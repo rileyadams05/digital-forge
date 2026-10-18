@@ -4,10 +4,6 @@ compatibility_date = "2026-10-17"
 workers_dev = false
 keep_vars = true
 
-[[routes]]
-pattern = "digital-forge-api.vortex-prime-emu.com"
-custom_domain = true
-
 [vars]
 SITE_ORIGIN = "https://digital-forge.vortex-prime-emu.com"
 SITE_PATH = ""
