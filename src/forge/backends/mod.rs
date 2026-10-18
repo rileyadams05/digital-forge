@@ -18,7 +18,8 @@ use crate::forge::platform::Platform;
 
 use adapter::ToolBackend;
 pub use adapter::{
-    extract_ps3_pkg_for_workflow, find_liborbis_pkg_tool, find_orbis_pkg_tool, find_orbis_pub_cmd,
+    extract_ps3_pkg_for_workflow, find_liborbis_pkg_tool, find_native_orbis_pkg_tool,
+    find_orbis_pkg_tool, find_orbis_pub_cmd,
 };
 
 pub fn get_backend_for_id(id: &str) -> Option<Box<dyn ConversionBackend>> {

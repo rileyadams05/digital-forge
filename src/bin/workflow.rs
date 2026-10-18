@@ -4873,6 +4873,9 @@ fn strip_gp4_project_entries(gp4_path: &Path) -> Result<(), Error> {
 }
 
 fn find_orbis_pkg_tool() -> Option<PathBuf> {
+    if let Some(native) = iso2god::forge::backends::find_native_orbis_pkg_tool() {
+        return Some(native);
+    }
     if let Some(configured) = env::var_os("DIGITAL_FORGE_ORBIS_PKG_TOOL") {
         let path = PathBuf::from(configured);
         if path.is_file() {

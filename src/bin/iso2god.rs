@@ -41,7 +41,7 @@ use workflow::{
 };
 
 #[derive(Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(name = "Digital Forge", author, version, about, long_about = None)]
 #[command(color = clap::ColorChoice::Never)]
 struct Cli {
     /// ISO or ZIP/7Z/RAR archive to convert

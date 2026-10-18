@@ -216,6 +216,75 @@ fn ps4_magic_alone_is_not_accepted_as_a_valid_package() {
 }
 
 #[test]
+#[ignore = "requires the checksum-verified OrbisPkgTool runtime via DIGITAL_FORGE_NATIVE_ORBIS_PKG_TOOL"]
+fn ps4_orbis_pkgtool_backend_builds_and_validates_base_and_update_fpkg() {
+    let tool = std::env::var_os("DIGITAL_FORGE_NATIVE_ORBIS_PKG_TOOL")
+        .map(std::path::PathBuf::from)
+        .expect("DIGITAL_FORGE_NATIVE_ORBIS_PKG_TOOL must point to verified OrbisPkgTool");
+    assert!(tool.is_file(), "OrbisPkgTool not found: {}", tool.display());
+
+    fn make_game(root: &std::path::Path, category: &str) {
+        fs::create_dir_all(root.join("sce_sys")).unwrap();
+        fs::write(
+            root.join("eboot.bin"),
+            b"synthetic non-launchable packaging fixture",
+        )
+        .unwrap();
+        let sfo = std::process::Command::new(
+            std::env::var_os("DIGITAL_FORGE_NATIVE_ORBIS_PKG_TOOL").unwrap(),
+        )
+        .args([
+            "sfo",
+            "create",
+            root.join("sce_sys/param.sfo").to_str().unwrap(),
+            "--title",
+            "Synthetic Digital Forge fixture",
+            "--title-id",
+            "CUSA00001",
+            "--content-id",
+            "UP0001-CUSA00001_00-DIGITALFORGE0001",
+            "--category",
+            category,
+        ])
+        .output()
+        .unwrap();
+        assert!(
+            sfo.status.success(),
+            "OrbisPkgTool SFO fixture creation failed: {}{}",
+            String::from_utf8_lossy(&sfo.stdout),
+            String::from_utf8_lossy(&sfo.stderr)
+        );
+    }
+
+    let workspace = TempWorkspace::new("ps4_orbis_pkgtool_integration").unwrap();
+    let backend = get_backend_for_id("ps4_liborbispkg").unwrap();
+    for (category, label) in [("gd", "base"), ("gp", "update")] {
+        let game = workspace.root.join(format!("{label}_game"));
+        let output = workspace.root.join(format!("{label}_output"));
+        make_game(&game, category);
+        let input = detection(Platform::PlayStation4, SourceFormat::Ps4Folder, vec![game]);
+        let result = backend
+            .convert(
+                &input,
+                TargetFormat::Ps4FakePkg,
+                &output,
+                Arc::new(|_: ProgressUpdate| {}),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap_or_else(|error| panic!("synthetic PS4 {label} build failed: {error:#}"));
+        assert!(result.output_path.is_file());
+        assert!(fs::metadata(&result.output_path).unwrap().len() >= 1024 * 1024);
+        assert!(backend.validate_output(&result).unwrap().is_valid);
+        assert!(
+            result
+                .tool_report
+                .as_ref()
+                .is_some_and(|report| report.upstream_version.contains("OrbisPkgTool"))
+        );
+    }
+}
+
+#[test]
 fn removed_routes_are_not_selectable() {
     assert!(
         FormatMatrix::find_rule(Platform::Psp, SourceFormat::Pbp, TargetFormat::PspIso).is_none()

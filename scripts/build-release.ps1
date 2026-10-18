@@ -57,6 +57,47 @@ function Copy-AnyPS5Runtime([string]$Destination) {
     Copy-Item -LiteralPath $sourceCode -Destination (Join-Path $runtime 'pkg-to-anyps5-source') -Recurse -Force
 }
 
+function Copy-OrbisPkgToolRuntime([string]$Destination) {
+    $archiveHash = 'C19FB3905AECEA32BCA41CD13D5EBA1172B82056AF5DCD69FCFECBF866BC8D63'
+    $downloadUrl = 'https://github.com/pearlxcore/OrbisPkgTool/releases/download/v1.0.0/OrbisPkgTool-v1.0.0-win-x64.zip'
+    $staging = Join-Path $repo '.tmp\OrbisPkgTool-v1.0.0'
+    $archive = Join-Path $repo '.tmp\OrbisPkgTool-v1.0.0-win-x64.zip'
+    $source = Join-Path $staging 'OrbisPkgTool-v1.0.0-win-x64'
+    $exe = Join-Path $source 'OrbisPkgTool.exe'
+
+    if (-not (Test-Path -LiteralPath $archive)) {
+        New-Item -ItemType Directory -Path (Split-Path $archive -Parent) -Force | Out-Null
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $archive
+    }
+    $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToUpperInvariant()
+    if ($actualHash -ne $archiveHash) {
+        throw "OrbisPkgTool archive checksum mismatch. Expected $archiveHash; found $actualHash."
+    }
+    if (-not (Test-Path -LiteralPath $exe)) {
+        if (Test-Path -LiteralPath $staging) {
+            Remove-Item -LiteralPath $staging -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $staging -Force | Out-Null
+        Expand-Archive -LiteralPath $archive -DestinationPath $staging -Force
+    }
+    if (-not (Test-Path -LiteralPath $exe)) {
+        throw "Verified OrbisPkgTool archive did not contain the expected CLI: $exe"
+    }
+
+    $runtime = Join-Path $Destination 'runtime\ps4\OrbisPkgTool'
+    New-Item -ItemType Directory -Path $runtime -Force | Out-Null
+    Copy-Item -LiteralPath $exe -Destination $runtime -Force
+    Copy-Item -LiteralPath (Join-Path $source 'LICENSE') -Destination $runtime -Force
+    Copy-Item -LiteralPath (Join-Path $source 'README.md') -Destination $runtime -Force
+    @(
+        "OrbisPkgTool v1.0.0 archive SHA256: $archiveHash"
+        "Source: $downloadUrl"
+        'License: MIT (see LICENSE)'
+        'Use: GP4 generation, FPKG creation and deep structural validation.'
+        'Limit: tool reports PC structural validation; it does not establish installation, launch, or gameplay on PS4 hardware.'
+    ) | Set-Content -LiteralPath (Join-Path $runtime 'THIRD-PARTY-NOTICE.txt') -Encoding utf8
+}
+
 function Write-ReleaseManifest($Name, $Config, $Destination) {
     $ps3Status = 'PS3 PKG creation is unavailable: CFW2OFW prepares compatible disc games for the OFW data-transfer workflow and make_npdata only encrypts/decrypts EDAT/SDAT data; neither is a general JB-folder-to-installable-PKG builder. PS3DK remains retired. ISO/folder conversions require compatible external CLI tools.'
     @(
@@ -66,8 +107,8 @@ function Write-ReleaseManifest($Name, $Config, $Destination) {
         "PS3 PKG creation: unavailable until a replacement package builder is verified"
         "PS3 ISO and folder conversions: require compatible configured CLI tools"
         "PS3 dependency status: $ps3Status"
-        "PS4 FPKG creation: code is configured for the CyB1K 3.87 publisher. Its SHA256 matches pinned upstream revision c08d922e8998cb413f44fdb005c7d6d7eb1b1f13, but the matching ext/sc.exe dependency fails to launch on the build host with Windows error 623, so package creation was not verified here. Publisher tools are external and not bundled."
-        "PS5 ItemzFlow: listens on the selected local interface/port for a PS5 TAR stream, validates an already prepared game folder, and copies that prepared folder into the selected output workspace. TAR extraction, native executable preparation/fake-signing, and creation of a prepared ItemzFlow folder from a raw dump are not included."
+        "PS4 base and update GP4 generation / FPKG creation: OrbisPkgTool v1.0.0 is bundled after verifying its official release archive SHA256 (C19FB3905AECEA32BCA41CD13D5EBA1172B82056AF5DCD69FCFECBF866BC8D63). Synthetic packaging fixtures with non-launchable dummy eboot files passed the Digital Forge backend, GP4 generation, FPKG creation, 8-stage validation, and metadata readback for both base and update categories. Windows error 623 is avoided by using this managed builder instead of the patched publisher; no real-game or PS4 hardware result is claimed."
+        "PS5 ItemzFlow: receives a TAR stream, and the generic archive workflow can extract TAR files when 7-Zip is configured. The ItemzFlow backend validates/copies an already prepared native game folder. PS5-specific dump normalization and makefself/executable preparation are not implemented, so a raw TAR is not yet transformed into a ready-to-launch ItemzFlow game folder."
         "PS5 AnyPS5: debug-FIH-PKG/folder preparation is bundled and synthetic-fixture tested; output still requires the separate AnyPS5 relinker and is not presented as playable."
         "Build source: $($Config.CargoTarget) / cargo build --release --locked"
     ) | Set-Content -LiteralPath (Join-Path $Destination 'RELEASE-MANIFEST.txt') -Encoding utf8
@@ -131,6 +172,7 @@ foreach ($name in $names) {
         Copy-ManagedTree (Join-Path $repo 'vendor\ps3-pkg-module') (Join-Path $runtime 'ps3-pkg-module')
         Copy-ManagedTree (Join-Path $repo 'vendor\ps3-update-dl') (Join-Path $runtime 'ps3-update-dl')
         Copy-AnyPS5Runtime $destination
+        Copy-OrbisPkgToolRuntime $destination
         Write-ReleaseManifest $name $config $destination
     } elseif ($config.Os -eq 'Windows') {
         foreach ($managed in @('ps3-update-dl', 'ps3dk')) {

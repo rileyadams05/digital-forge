@@ -1067,12 +1067,19 @@ fn run_pkgtool_build_fpkg(
     progress: Arc<dyn Fn(ProgressUpdate) + Send + Sync>,
     title_id: Option<&str>,
 ) -> Result<Execution, Error> {
-    let tool = find_orbis_pkg_tool()
+    let native_tool = find_native_orbis_pkg_tool();
+    let tool = native_tool
+        .clone()
+        .or_else(find_orbis_pkg_tool)
         .or_else(|| find_tool("PKGTOOL", &["OrbisPkgTool", "orbis-pkg-tool"]))
         .context("Digital Forge GP4 generator was not found")?;
-    let publisher = find_orbis_pub_cmd().context(
-        "PS4 publishing tools are not configured. Set DIGITAL_FORGE_PS4_TOOLS to the tools directory or DIGITAL_FORGE_TOOL_ORBIS_PUB_CMD to orbis-pub-cmd.exe",
-    )?;
+    let publisher = if native_tool.is_none() {
+        Some(find_orbis_pub_cmd().context(
+            "PS4 publishing tools are not configured and OrbisPkgTool is unavailable. Install the verified OrbisPkgTool runtime or set DIGITAL_FORGE_PS4_TOOLS / DIGITAL_FORGE_TOOL_ORBIS_PUB_CMD",
+        )?)
+    } else {
+        None
+    };
 
     // Packaging must never rewrite the caller's source tree in place.
     let sfo_path = source_dir.join("sce_sys").join("param.sfo");
@@ -1176,22 +1183,42 @@ fn run_pkgtool_build_fpkg(
     });
 
     ensure!(!cancelled.load(Ordering::Relaxed), "conversion cancelled");
-    let build = Command::new(&publisher)
-        .arg("img_create")
-        .arg("--oformat")
-        .arg("pkg")
-        .arg("--passcode")
-        .arg("00000000000000000000000000000000")
-        .arg("--no_progress_bar")
-        .arg(&gp4_path)
-        .arg(output_dir)
-        .output()
-        .with_context(|| format!("failed to launch CyB1K publisher {}", publisher.display()))?;
+    let (build, builder_name) = if let Some(publisher) = publisher {
+        (
+            Command::new(&publisher)
+                .arg("img_create")
+                .arg("--oformat")
+                .arg("pkg")
+                .arg("--passcode")
+                .arg("00000000000000000000000000000000")
+                .arg("--no_progress_bar")
+                .arg(&gp4_path)
+                .arg(output_dir)
+                .output()
+                .with_context(|| {
+                    format!("failed to launch PS4 publisher {}", publisher.display())
+                })?,
+            publisher.display().to_string(),
+        )
+    } else {
+        (
+            Command::new(&tool)
+                .arg("build")
+                .arg(&gp4_path)
+                .arg(source_dir)
+                .arg("--out")
+                .arg(&output_pkg)
+                .arg("--validate")
+                .output()
+                .with_context(|| format!("failed to launch OrbisPkgTool {}", tool.display()))?,
+            tool.display().to_string(),
+        )
+    };
     let stdout_text = String::from_utf8_lossy(&build.stdout).into_owned();
     let stderr_text = String::from_utf8_lossy(&build.stderr).into_owned();
     ensure!(
         build.status.success(),
-        "CyB1K FPKG publisher failed: {stdout_text}{stderr_text}"
+        "PS4 FPKG builder failed: {stdout_text}{stderr_text}"
     );
     ensure!(!cancelled.load(Ordering::Relaxed), "conversion cancelled");
     let generated = fs::read_dir(output_dir)?
@@ -1200,19 +1227,36 @@ fn run_pkgtool_build_fpkg(
         .find(|path| {
             path.extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("pkg"))
+                && path == &output_pkg
         })
-        .context("CyB1K publisher finished but output PKG is missing")?;
+        .or_else(|| {
+            fs::read_dir(output_dir)
+                .ok()?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("pkg"))
+                })
+        })
+        .context("PS4 FPKG builder finished but output PKG is missing")?;
     if generated != output_pkg {
         fs::rename(&generated, &output_pkg)?;
     }
-    let verify_tool = find_orbis_pkg_tool()
+    let verify_tool = find_native_orbis_pkg_tool()
+        .or_else(find_orbis_pkg_tool)
         .or_else(|| find_tool("PKGTOOL", &["OrbisPkgTool", "orbis-pkg-tool"]))
         .context("Digital Forge package validator was not found")?;
-    let verify = Command::new(&verify_tool)
-        .arg("pkg_validate")
-        .arg("--verbose")
-        .arg(&output_pkg)
-        .output()?;
+    let mut verify_command = Command::new(&verify_tool);
+    if verify_tool
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("OrbisPkgTool.exe"))
+    {
+        verify_command.arg("validate").arg("--fake-tolerant");
+    } else {
+        verify_command.arg("pkg_validate").arg("--verbose");
+    }
+    let verify = verify_command.arg(&output_pkg).output()?;
     let verify_text = format!(
         "{}{}",
         String::from_utf8_lossy(&verify.stdout),
@@ -1227,11 +1271,26 @@ fn run_pkgtool_build_fpkg(
     Ok(Execution {
         output_path: output_pkg,
         aux_files: Vec::new(),
-        command: vec![publisher.display().to_string(), "img_create".to_string()],
+        command: vec![
+            builder_name,
+            if native_tool.is_some() {
+                "build"
+            } else {
+                "img_create"
+            }
+            .to_string(),
+        ],
         stdout: stdout_text,
         stderr: stderr_text,
         exit_code: build.status.code(),
-        tool_version: Some("CyB1K PS4 Fake PKG Tools 3.87 publisher".to_string()),
+        tool_version: Some(
+            if native_tool.is_some() {
+                "OrbisPkgTool v1.0.0 (PC-validated; not hardware-tested)"
+            } else {
+                "CyB1K PS4 Fake PKG Tools 3.87 publisher"
+            }
+            .to_string(),
+        ),
     })
 }
 
@@ -1726,6 +1785,25 @@ pub fn find_orbis_pkg_tool() -> Option<PathBuf> {
     {
         None
     }
+}
+
+/// Resolves the maintained OrbisPkgTool CLI used for native GP4 and FPKG
+/// creation. Kept separate from the legacy LibOrbisPkg adapter because its
+/// command-line verbs differ.
+pub fn find_native_orbis_pkg_tool() -> Option<PathBuf> {
+    let configured = env::var_os("DIGITAL_FORGE_NATIVE_ORBIS_PKG_TOOL").map(PathBuf::from);
+    let mut candidates = configured.into_iter().collect::<Vec<_>>();
+    if let Ok(executable) = env::current_exe()
+        && let Some(directory) = executable.parent()
+    {
+        candidates.push(directory.join("runtime/ps4/OrbisPkgTool/OrbisPkgTool.exe"));
+        candidates.push(directory.join("OrbisPkgTool/OrbisPkgTool.exe"));
+    }
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../consoles/PlayStation/FPKG/tools/OrbisPkgTool/OrbisPkgTool.exe"),
+    );
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 /// Resolves the configured LibOrbisPkg tool when supplied by the user.
@@ -2698,14 +2776,24 @@ fn validate_ps4_pkg(path: &Path, fake_tolerant: bool) -> Result<ValidationReport
             "PS4 PKG is smaller than the format's 1 MiB minimum",
         ));
     }
-    let lib_tool = find_liborbis_pkg_tool()
-        .context("PS4 deep validation requires maxton/LibOrbisPkg PkgTool")?;
-    let output = Command::new(&lib_tool)
-        .arg("pkg_validate")
-        .arg("--verbose")
-        .arg(path)
-        .output()
-        .with_context(|| format!("could not deep-validate {}", path.display()))?;
+    let native_tool = find_native_orbis_pkg_tool();
+    let output = if let Some(tool) = &native_tool {
+        let mut command = Command::new(tool);
+        command.arg("validate");
+        if fake_tolerant {
+            command.arg("--fake-tolerant");
+        }
+        command.arg(path).output()
+    } else {
+        let lib_tool = find_liborbis_pkg_tool()
+            .context("PS4 deep validation requires OrbisPkgTool or LibOrbisPkg PkgTool")?;
+        Command::new(&lib_tool)
+            .arg("pkg_validate")
+            .arg("--verbose")
+            .arg(path)
+            .output()
+    }
+    .with_context(|| format!("could not deep-validate {}", path.display()))?;
     let validation_text = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -2726,7 +2814,9 @@ fn validate_ps4_pkg(path: &Path, fake_tolerant: bool) -> Result<ValidationReport
             )));
         }
     }
-    let tool = find_orbis_pkg_tool().context("PS4 semantic validation requires OrbisPkgTool")?;
+    let tool = native_tool
+        .or_else(find_orbis_pkg_tool)
+        .context("PS4 semantic validation requires OrbisPkgTool")?;
     let info = Command::new(&tool).arg("info").arg(path).output()?;
     if !info.status.success() {
         return Ok(ValidationReport::failed(
