@@ -152,7 +152,7 @@ function field(form, name, label, regex) {
   return value;
 }
 async function openPullRequest(env, record, logBytes, fileName, user, token) {
-  const base = env.GITHUB_BASE_BRANCH || "master";
+  const base = env.GITHUB_BASE_BRANCH || "main";
   const repo = "https://api.github.com/repos/" + env.GITHUB_OWNER + "/" + env.GITHUB_REPOSITORY;
   const openPulls = await gh(repo + "/pulls?state=open&per_page=100", token);
   if (openPulls.some(pull => pull.title === "Successful test: " + record.game_id)) {
@@ -213,7 +213,7 @@ async function submit(env, request) {
     const log = new Uint8Array(await file.arrayBuffer()); dec.decode(log);
     const token = await appToken(env), repo = "https://api.github.com/repos/" + env.GITHUB_OWNER + "/" + env.GITHUB_REPOSITORY;
     const resultsPath = repositoryResultsPath(env);
-    const base = env.GITHUB_BASE_BRANCH || "master", path = resultsPath + "/" + id + ".json";
+    const base = env.GITHUB_BASE_BRANCH || "main", path = resultsPath + "/" + id + ".json";
     const exists = await fetch(repo + "/contents/" + path + "?ref=" + encodeURIComponent(base), {
       headers: { Accept: "application/vnd.github+json", Authorization: "Bearer " + token, "X-GitHub-Api-Version": "2022-11-28" }
     });

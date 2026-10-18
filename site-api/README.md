@@ -44,17 +44,17 @@ The Cloudflare Worker is configured for `digital-forge-api.vortex-prime-emu.com`
 
 Set `SESSION_SECRET` to a randomly generated value of at least 32 bytes. The private key is the PEM private key generated for the GitHub App. The API keeps it server-side, creates short-lived App installation tokens, and never exposes it to visitors.
 
-To deploy Worker updates from the Digital Forge repository, add Actions secrets `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` to that repository. The token should be scoped only to Worker deployment in the Cloudflare account. The `success-api.yml` workflow deploys this Worker; the `pages.yml` workflow deploys the website.
+To deploy Worker updates from the Digital Forge repository, the Actions secrets `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` must be available in that repository. The token should be scoped only to Worker deployment in the Cloudflare account. The `success-api.yml` workflow deploys this Worker when both secrets are present; otherwise it records a notice and leaves the current live Worker unchanged. The `pages.yml` workflow deploys the website independently.
 
 ### 4. Connect and deploy the site
 
-In `rileyadams05/digital-forge` → Settings → Secrets and variables → Actions → Variables, set:
+The Pages workflow uses `DIGITAL_FORGE_SUCCESS_API` from repository Actions variables when set. It defaults to the public reporting API URL below, so static Pages deployment does not depend on this variable:
 
-    DIGITAL_FORGE_SUCCESS_API = https://digital-forge-api.vortex-prime-emu.com
+    https://digital-forge-api.vortex-prime-emu.com
 
-The Pages workflow fails before production publication if this variable is missing. After deployment, verify the API's `/auth/start` redirects to GitHub and make a controlled test submission before announcing the flow.
+The Pages workflow only publishes the static website. The separate `success-api.yml` workflow deploys Worker changes and requires the existing `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` Actions secrets. After a Worker deployment, verify `/auth/start` redirects to GitHub and make a controlled test submission before announcing the flow.
 
-Protect `master` so result changes require pull-request review. The Worker checks for existing approved results and open result pull requests for the same game ID, creates one JSON result and one attached log file per request, and never merges it. Pending logs are public while their pull requests are open because the GitHub repository is public.
+Protect `main` so result changes require pull-request review. The Worker checks for existing approved results and open result pull requests for the same game ID, creates one JSON result and one attached log file per request, and never merges it. Pending logs are public while their pull requests are open because the GitHub repository is public.
 
 ## Digital Forge desktop-app connection
 
