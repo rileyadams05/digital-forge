@@ -2,6 +2,7 @@ name = "digital-forge-success-api"
 main = "src/index.mjs"
 compatibility_date = "2026-10-17"
 workers_dev = false
+keep_vars = true
 
 [[routes]]
 pattern = "digital-forge-api.vortex-prime-emu.com"
@@ -15,6 +16,3 @@ GITHUB_REPOSITORY = "digital-forge"
 GITHUB_BASE_BRANCH = "main"
 GITHUB_RESULTS_PATH = "site/assets/game-results"
 GITHUB_APP_CALLBACK_URL = "https://digital-forge-api.vortex-prime-emu.com/auth/callback"
-GITHUB_APP_ID = ""
-GITHUB_APP_CLIENT_ID = ""
-GITHUB_INSTALLATION_ID = ""
