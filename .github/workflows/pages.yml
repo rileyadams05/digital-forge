@@ -2,7 +2,7 @@ name: Deploy Digital Forge website
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths:
       - "site/**"
       - "site-api/**"
@@ -23,7 +23,7 @@ jobs:
     name: Validate and package website
     runs-on: ubuntu-latest
     env:
-      DIGITAL_FORGE_SUCCESS_API: ${{ vars.DIGITAL_FORGE_SUCCESS_API }}
+      DIGITAL_FORGE_SUCCESS_API: ${{ vars.DIGITAL_FORGE_SUCCESS_API || 'https://digital-forge-api.vortex-prime-emu.com' }}
     permissions:
       contents: read
       pages: write
@@ -47,11 +47,6 @@ jobs:
       - name: Configure GitHub Pages
         if: github.event_name != 'pull_request'
         uses: actions/configure-pages@v5
-      - name: Require the success-report API endpoint before publishing
-        if: github.event_name != 'pull_request' && vars.DIGITAL_FORGE_SUCCESS_API == ''
-        run: |
-          echo "::error::Set the DIGITAL_FORGE_SUCCESS_API repository variable to the deployed Cloudflare Worker URL before publishing this website update."
-          exit 1
       - name: Upload static website artifact
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v4
@@ -60,7 +55,7 @@ jobs:
 
   deploy:
     name: Deploy website to GitHub Pages
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:

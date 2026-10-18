@@ -1,5 +1,5 @@
-use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -81,35 +81,204 @@ pub fn copy_prepared_itemzflow_folder(
     validate_target_folder(source, TargetWorkflow::Ps5ItemzFlow)?;
     let total_bytes = folder_file_bytes(source, cancelled)?;
     let destination = output_dir.join("Itemzflow");
-    let staging = output_dir.join(".Itemzflow.partial");
     ensure!(
-        !destination.exists() && !staging.exists(),
+        !destination.exists(),
         "PS5 Itemzflow output already exists in the operation workspace"
     );
-    fs::create_dir_all(&staging)?;
+    fs::create_dir_all(&destination)?;
     let result = (|| {
         let mut bytes_copied = 0u64;
         progress(0, total_bytes);
         copy_folder_contents(
             source,
-            &staging,
+            &destination,
             cancelled,
             &mut bytes_copied,
             total_bytes,
             &mut progress,
         )?;
         ensure!(!cancelled.load(Ordering::Relaxed), "conversion cancelled");
-        validate_target_folder(&staging, TargetWorkflow::Ps5ItemzFlow)
+        validate_target_folder(&destination, TargetWorkflow::Ps5ItemzFlow)
             .context("copied PS5 Itemzflow folder failed validation")?;
-        fs::rename(&staging, &destination)
-            .context("could not finalize the copied PS5 Itemzflow folder")?;
         progress(total_bytes, total_bytes);
-        Ok(destination)
+        Ok(destination.clone())
     })();
     if result.is_err() {
-        let _ = fs::remove_dir_all(&staging);
+        let _ = fs::remove_dir_all(&destination);
     }
     result
+}
+
+/// Safely extracts a plain TAR dump. It accepts only regular files and
+/// directories, validates each header checksum, and rejects links, traversal,
+/// duplicate paths, and truncated entries. Returns the unique native game root.
+pub fn extract_itemzflow_tar(
+    archive: &Path,
+    staging_root: &Path,
+    cancelled: &AtomicBool,
+) -> Result<PathBuf, Error> {
+    fs::create_dir_all(staging_root)?;
+    let mut input = File::open(archive)?;
+    let archive_len = input.metadata()?.len();
+    let mut seen = std::collections::HashSet::new();
+    let mut header = [0u8; 512];
+    let mut entries = 0usize;
+    loop {
+        ensure!(
+            !cancelled.load(Ordering::Relaxed),
+            "TAR extraction cancelled"
+        );
+        let offset = input.stream_position()?;
+        if offset >= archive_len {
+            break;
+        }
+        input
+            .read_exact(&mut header)
+            .context("truncated TAR header")?;
+        if header.iter().all(|byte| *byte == 0) {
+            break;
+        }
+        validate_tar_header(&header)?;
+        let name = tar_header_string(&header[0..100])?;
+        let prefix = tar_header_string(&header[345..500])?;
+        let relative = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let relative = safe_tar_path(&relative)?;
+        ensure!(
+            seen.insert(relative.clone()),
+            "TAR contains a duplicate path: {}",
+            relative.display()
+        );
+        entries = entries.checked_add(1).context("TAR entry count overflow")?;
+        ensure!(entries <= 500_000, "TAR contains too many entries");
+        let size = parse_tar_octal(&header[124..136])?;
+        let kind = header[156];
+        let target = staging_root.join(&relative);
+        if kind == 0 || kind == b'0' {
+            let parent = target.parent().context("invalid TAR member path")?;
+            fs::create_dir_all(parent)?;
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)
+                .with_context(|| format!("could not create TAR member {}", relative.display()))?;
+            let mut limited = (&mut input).take(size);
+            let copied = std::io::copy(&mut limited, &mut output)?;
+            ensure!(
+                copied == size,
+                "TAR member was truncated: {}",
+                relative.display()
+            );
+            output.sync_all()?;
+            let padded = (size.checked_add(511).context("TAR member size overflow")? / 512)
+                .checked_mul(512)
+                .context("TAR padded size overflow")?;
+            input.seek(SeekFrom::Current((padded - size) as i64))?;
+        } else if kind == b'5' {
+            ensure!(size == 0, "TAR directory entry has unexpected data");
+            fs::create_dir_all(&target)?;
+        } else {
+            anyhow::bail!(
+                "TAR contains unsupported link or special entry type {kind:#x}: {}",
+                relative.display()
+            );
+        }
+        ensure!(
+            input.stream_position()? <= archive_len,
+            "TAR entry exceeds archive length"
+        );
+    }
+    ensure!(entries > 0, "TAR archive is empty");
+    let mut candidates = Vec::new();
+    find_native_game_roots(staging_root, &mut candidates, 0)?;
+    ensure!(
+        candidates.len() == 1,
+        "expected one PS5 game root in TAR; found {}",
+        candidates.len()
+    );
+    Ok(candidates.remove(0))
+}
+
+fn validate_tar_header(header: &[u8; 512]) -> Result<(), Error> {
+    let stored = parse_tar_octal(&header[148..156])?;
+    let actual: u64 = header
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| {
+            if (148..156).contains(&index) {
+                b' ' as u64
+            } else {
+                *byte as u64
+            }
+        })
+        .sum();
+    ensure!(stored == actual, "TAR header checksum mismatch");
+    Ok(())
+}
+
+fn tar_header_string(field: &[u8]) -> Result<String, Error> {
+    let end = field
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(field.len());
+    Ok(std::str::from_utf8(&field[..end])?.to_owned())
+}
+
+fn parse_tar_octal(field: &[u8]) -> Result<u64, Error> {
+    let text = field
+        .iter()
+        .copied()
+        .skip_while(|byte| *byte == b' ' || *byte == 0)
+        .take_while(|byte| *byte != b' ' && *byte != 0)
+        .collect::<Vec<_>>();
+    ensure!(!text.is_empty(), "TAR numeric field is empty");
+    let text = std::str::from_utf8(&text)?;
+    u64::from_str_radix(text, 8).context("invalid TAR octal value")
+}
+
+fn safe_tar_path(raw: &str) -> Result<PathBuf, Error> {
+    ensure!(
+        !raw.is_empty() && !raw.contains('\\') && !raw.starts_with('/'),
+        "TAR member path is absolute or empty"
+    );
+    let path = Path::new(raw);
+    for component in path.components() {
+        ensure!(
+            matches!(component, std::path::Component::Normal(_)),
+            "TAR member path contains traversal or a platform prefix: {raw}"
+        );
+    }
+    Ok(path.to_path_buf())
+}
+
+fn find_native_game_roots(
+    root: &Path,
+    found: &mut Vec<PathBuf>,
+    depth: usize,
+) -> Result<(), Error> {
+    ensure!(
+        depth <= 20,
+        "PS5 TAR directory nesting exceeds the supported limit"
+    );
+    if root.join("eboot.bin").is_file() && root.join("sce_sys/param.json").is_file() {
+        found.push(root.to_path_buf());
+        return Ok(());
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        ensure!(
+            !metadata.file_type().is_symlink(),
+            "TAR staging unexpectedly contains a symbolic link"
+        );
+        if metadata.is_dir() {
+            find_native_game_roots(&entry.path(), found, depth + 1)?;
+        }
+    }
+    Ok(())
 }
 
 fn folder_file_bytes(path: &Path, cancelled: &AtomicBool) -> Result<u64, Error> {
@@ -351,6 +520,88 @@ mod tests {
             test_sfo(&[("TITLE_ID", &title), ("CATEGORY", &category)]),
         )
         .expect("param.sfo");
+    }
+
+    fn append_tar_file(tar: &mut Vec<u8>, name: &str, contents: &[u8]) {
+        let mut header = [0u8; 512];
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        header[100..108].copy_from_slice(b"0000644\0");
+        header[108..116].copy_from_slice(b"0000000\0");
+        header[116..124].copy_from_slice(b"0000000\0");
+        let size = format!("{:011o}\0", contents.len());
+        header[124..136].copy_from_slice(size.as_bytes());
+        header[136..148].copy_from_slice(b"00000000000\0");
+        header[148..156].fill(b' ');
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        let checksum: u64 = header.iter().map(|byte| *byte as u64).sum();
+        let checksum_text = format!("{checksum:06o}\0 ");
+        header[148..156].copy_from_slice(checksum_text.as_bytes());
+        tar.extend_from_slice(&header);
+        tar.extend_from_slice(contents);
+        tar.resize(tar.len().div_ceil(512) * 512, 0);
+    }
+
+    fn build_fixture_tar(root: &Path, prefix: &str) -> PathBuf {
+        let mut tar = Vec::new();
+        append_tar_file(&mut tar, &format!("{prefix}/eboot.bin"), b"native eboot");
+        append_tar_file(
+            &mut tar,
+            &format!("{prefix}/sce_sys/param.json"),
+            br#"{"titleId":"PPSA12345","category":"gd"}"#,
+        );
+        let mut title = b"PPSA12345".to_vec();
+        title.push(0);
+        let mut category = b"gd".to_vec();
+        category.push(0);
+        let sfo = test_sfo(&[("TITLE_ID", &title), ("CATEGORY", &category)]);
+        append_tar_file(&mut tar, &format!("{prefix}/sce_sys/param.sfo"), &sfo);
+        append_tar_file(
+            &mut tar,
+            &format!("{prefix}/sce_module/test.sprx"),
+            b"module",
+        );
+        tar.extend_from_slice(&[0u8; 1024]);
+        let path = root.join("fixture.tar");
+        fs::write(&path, tar).expect("fixture TAR");
+        path
+    }
+
+    #[test]
+    fn ps5_tar_extraction_accepts_native_tree_and_rejects_traversal() {
+        let temp = TestDirectory::new();
+        let archive = build_fixture_tar(&temp.0, "PPSA12345-app0");
+        let extracted = temp.0.join("extracted");
+        let game = extract_itemzflow_tar(&archive, &extracted, &AtomicBool::new(false))
+            .expect("extract valid TAR");
+        assert!(game.join("eboot.bin").is_file());
+        assert!(game.join("sce_module/test.sprx").is_file());
+
+        let malicious = temp.0.join("traversal.tar");
+        let mut tar = Vec::new();
+        append_tar_file(&mut tar, "../outside", b"bad");
+        tar.extend_from_slice(&[0u8; 1024]);
+        fs::write(&malicious, tar).unwrap();
+        assert!(
+            extract_itemzflow_tar(&malicious, &temp.0.join("unsafe"), &AtomicBool::new(false))
+                .is_err()
+        );
+        assert!(!temp.0.join("outside").exists());
+    }
+
+    #[test]
+    fn prepared_tar_dump_is_validated_and_exported_as_itemzflow_folder() {
+        let temp = TestDirectory::new();
+        let archive = build_fixture_tar(&temp.0, "PPSA12345-app0");
+        let extraction = temp.0.join("extracted");
+        let source = extract_itemzflow_tar(&archive, &extraction, &AtomicBool::new(false))
+            .expect("extract dump");
+        let output = temp.0.join("output");
+        let result =
+            copy_prepared_itemzflow_folder(&source, &output, &AtomicBool::new(false), |_, _| {})
+                .expect("validate and export Itemzflow directory");
+        assert_eq!(result, output.join("Itemzflow"));
+        validate_target_folder(&result, TargetWorkflow::Ps5ItemzFlow).unwrap();
     }
 
     #[test]

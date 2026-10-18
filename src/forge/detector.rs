@@ -340,6 +340,27 @@ impl FormatDetector {
         // PS5 filesystem images are accepted only when their content agrees with
         // the extension. The extension alone never establishes a format.
         if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
+            if ext.eq_ignore_ascii_case("tar")
+                && hint_platform == Some(Platform::PlayStation5)
+                && has_tar_header(file_path)
+            {
+                return Ok(DetectionResult {
+                    platform: Platform::PlayStation5,
+                    source_format: SourceFormat::Ps5DumpTar,
+                    package_classification: Some(PackageClassification::GameApp),
+                    confidence: ConfidenceLevel::High,
+                    game_id: None,
+                    title_name: None,
+                    is_multipart: false,
+                    is_archive: true,
+                    is_multidisc,
+                    disc_number: disc_num,
+                    total_discs,
+                    related_files: vec![file_path.to_path_buf()],
+                    missing_parts: Vec::new(),
+                    license_status: LicenseStatus::NotApplicable,
+                });
+            }
             if ext.eq_ignore_ascii_case("ffpkg") && has_ufs2_superblock(file_path) {
                 return Ok(DetectionResult {
                     platform: Platform::PlayStation5,
@@ -1530,6 +1551,32 @@ impl FormatDetector {
         }
         (files, missing)
     }
+}
+
+fn has_tar_header(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; 512];
+    if file.read_exact(&mut header).is_err() {
+        return false;
+    }
+    let stored = std::str::from_utf8(&header[148..156])
+        .ok()
+        .and_then(|field| u64::from_str_radix(field.trim_matches(['\0', ' ']), 8).ok());
+    let Some(stored) = stored else { return false };
+    let checksum: u64 = header
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| {
+            if (148..156).contains(&index) {
+                b' ' as u64
+            } else {
+                *byte as u64
+            }
+        })
+        .sum();
+    checksum == stored
 }
 
 // Helpers

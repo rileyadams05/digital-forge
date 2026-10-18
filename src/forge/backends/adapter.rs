@@ -183,6 +183,11 @@ fn provenance(id: &str) -> (&'static str, &'static str, &'static str) {
             "Aldostools PS3 Tools Collection integration",
             "external tools; see setup diagnostics",
         ),
+        "ps3_iso" => (
+            "PS3 ISO utilities adapter",
+            "Bucanero/ps3iso-utils (Estwald/Hermes)",
+            "277db7de; locally rebuilt with MSVC",
+        ),
         "ps3_split_reassembly" => (
             "Sequential split reassembler",
             "Digital Forge",
@@ -265,7 +270,11 @@ fn execute(
     match id {
         "native_passthrough"
             if input.platform == Platform::PlayStation5
-                && target == TargetFormat::Ps5LooseFolder =>
+                && target == TargetFormat::Ps5LooseFolder
+                && matches!(
+                    input.source_format,
+                    SourceFormat::Ps5LooseFolder | SourceFormat::Ps5DumpTar
+                ) =>
         {
             run_ps5_itemzflow_folder(input, output_dir, cancelled, progress)
         }
@@ -332,7 +341,7 @@ fn execute(
         "ps2_maxcso" | "psp_maxcso" => run_maxcso(source, target, output_dir),
         "ps2_chdman" => run_ps2_chdman(source, target, output_dir),
         "ps2_usbextreme" => write_usbextreme(input, output_dir, cancelled),
-        "ps3_pkg" => run_ps3_pkg(input, target, output_dir, cancelled, progress),
+        "ps3_pkg" | "ps3_iso" => run_ps3_pkg(input, target, output_dir, cancelled, progress),
         "ps3_split_reassembly" | "ps5_raw_split" | "xbox360_split" if is_merge_target(target) => {
             merge_raw_parts(&input.related_files, output_dir, target, cancelled)
         }
@@ -661,7 +670,7 @@ fn run_ps3_iso_workflow(
     let source = input.related_files.first().context("no PS3 source path")?;
     match (input.source_format, target) {
         (SourceFormat::Ps3Iso, TargetFormat::Ps3JbFolder) => {
-            let candidates = ["extractps3iso"];
+            let candidates = ["extractps3iso", "runtime/ps3iso/extractps3iso"];
             let output = output_dir.join("game");
             run_tool(
                 "PS3_EXTRACT_ISO",
@@ -679,7 +688,7 @@ fn run_ps3_iso_workflow(
                 std::io::copy(&mut File::open(part)?, &mut out)?;
             }
             out.flush()?;
-            let candidates = ["extractps3iso"];
+            let candidates = ["extractps3iso", "runtime/ps3iso/extractps3iso"];
             let output = output_dir.join("game");
             run_tool(
                 "PS3_EXTRACT_ISO",
@@ -691,11 +700,15 @@ fn run_ps3_iso_workflow(
         }
         (SourceFormat::Ps3JbFolder, TargetFormat::Ps3Iso) => {
             let iso = output_dir.join("game.iso");
-            let candidates = ["genps3iso"];
+            let candidates = ["makeps3iso", "genps3iso", "runtime/ps3iso/makeps3iso"];
             run_tool(
                 "PS3_GENERATE_ISO",
                 &candidates,
-                [source.as_os_str().to_owned(), iso.as_os_str().to_owned()],
+                [
+                    os("-p0"),
+                    source.as_os_str().to_owned(),
+                    iso.as_os_str().to_owned(),
+                ],
                 iso,
                 Vec::new(),
             )
@@ -715,8 +728,8 @@ fn valid_ps3_content_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// Extract a finalized PS3 PKG with the bundled established extractor. This
-/// is also used by the folder workflow before a bounded base/update merge.
+/// Extract a PS3 PKG with an optional local extractor runtime. The public
+/// release does not bundle the unverified third-party package module.
 pub fn extract_ps3_pkg_for_workflow(package: &Path, output_dir: &Path) -> Result<(), Error> {
     fs::create_dir_all(output_dir)?;
     let (python, extractor) = bundled_ps3_extractor()
@@ -1945,8 +1958,15 @@ fn run_ps5_itemzflow_folder(
     progress: Arc<dyn Fn(ProgressUpdate) + Send + Sync>,
 ) -> Result<Execution, Error> {
     let source = input.related_files.first().context("no PS5 game folder")?;
+    let archive_workspace;
+    let source = if input.source_format == SourceFormat::Ps5DumpTar {
+        archive_workspace = crate::forge::archive::TempWorkspace::new("ps5_itemzflow_tar")?;
+        crate::forge::ps5::extract_itemzflow_tar(source, &archive_workspace.root, &cancelled)?
+    } else {
+        source.to_path_buf()
+    };
     let output = crate::forge::ps5::copy_prepared_itemzflow_folder(
-        source,
+        &source,
         output_dir,
         &cancelled,
         |bytes_processed, total_bytes| {

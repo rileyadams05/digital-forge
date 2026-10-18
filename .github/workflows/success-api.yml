@@ -2,7 +2,7 @@ name: Deploy successful-test reporting API
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths:
       - "site-api/**"
       - ".github/workflows/success-api.yml"

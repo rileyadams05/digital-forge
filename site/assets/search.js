@@ -9,7 +9,7 @@ if (typeof document.addEventListener === "function") {
 
 const PROJECT = "https://github.com/rileyadams05/digital-forge";
 const REPORT_FORM = `${PROJECT}/issues/new?template=compatibility-report.yml`;
-const GAME_RESULTS_BASE = "https://raw.githubusercontent.com/rileyadams05/digital-forge/master/site/assets";
+const GAME_RESULTS_BASE = "https://raw.githubusercontent.com/rileyadams05/digital-forge/main/site/assets";
 const GAME_RESULTS_URL = GAME_RESULTS_BASE + "/game-results.json";
 const guides = [
   { title: "Itemzflow guide", url: "guides/itemzflow.html", platforms: ["ps4"], formats: ["itemzflow", "itemflow", "itemflows", "item flows"], keys: ["dump all", "gp4", "param.sfo"], summary: "Prepare and import an Itemzflow base-game and update dump folder for the existing PS4 single-package workflow." },

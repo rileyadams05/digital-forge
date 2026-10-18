@@ -60,6 +60,7 @@ pub static PLATFORM_CATALOG: &[PlatformProfile] = &[
             Ps5Pkg,
             Ps5RawSplitPkg,
             Ps5LooseFolder,
+            Ps5DumpTar,
             ShadowMountFfPkg,
             ShadowMountExfatImage,
             ShadowMountPfsImage,

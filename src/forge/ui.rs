@@ -398,10 +398,13 @@ impl ForgeUi {
                         | Platform::SunplusNative32
                 )
         });
+        let ps5_dump_tar = selected_platform == Some(Platform::PlayStation5)
+            && FormatDetector::detect(&active_source, selected_platform)
+                .is_ok_and(|detection| detection.source_format == SourceFormat::Ps5DumpTar);
 
         match archive_kind {
             ArchiveKind::SingleVolume(_) | ArchiveKind::MultiVolume { .. }
-                if structured_rom_set => {}
+                if structured_rom_set || ps5_dump_tar => {}
             ArchiveKind::MultiVolume {
                 ref first_volume,
                 ref all_volumes,

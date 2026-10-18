@@ -66,11 +66,11 @@ python3 site/scripts/validate.py /tmp/digital-forge-pages-preview
 ```
 
 `.github/workflows/pages.yml` runs those checks for pull requests and deploys when files under
-`site/`, the relevant format-matrix sources, or the workflow change on the default branch (`master`). Manual deployment is also available
-from GitHub Actions using **Deploy Digital Forge website → Run workflow**, on `master`. The Pages
+`site/`, the relevant format-matrix sources, or the workflow change on the default branch (`main`). Manual deployment is also available
+from GitHub Actions using **Deploy Digital Forge website → Run workflow**, on `main`. The Pages
 artifact contains only the HTML pages, generated format data, CSS/JavaScript assets, guides and
 `.nojekyll`; developer scripts and this README are excluded. Pages is already published; future
-website and format-matrix changes deploy automatically from `master`.
+website and format-matrix changes deploy automatically from `main`.
 
 The Digital Forge repository is `rileyadams05/digital-forge`; its intended public URL is
 `https://digital-forge.vortex-prime-emu.com/`. The Vortex Prime site remains a separate website

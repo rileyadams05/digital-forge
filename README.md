@@ -13,7 +13,7 @@ Use game files that you own or are authorized to use. Digital Forge does not byp
 protection or make an incompatible output playable.
 
 The website source is in [`site/`](site/README.md). GitHub Actions validates and publishes the
-static site when website files change on the `master` branch. The optional game-reporting API is
+static site when website files change on the `main` branch. The optional game-reporting API is
 documented in [`site-api/README.md`](site-api/README.md).
 
 The guide below retains Xbox 360 setup and conversion instructions from the project's ISO2God

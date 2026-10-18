@@ -98,17 +98,54 @@ function Copy-OrbisPkgToolRuntime([string]$Destination) {
     ) | Set-Content -LiteralPath (Join-Path $runtime 'THIRD-PARTY-NOTICE.txt') -Encoding utf8
 }
 
+function Copy-PS3IsoRuntime([string]$Destination) {
+    $source = Join-Path (Split-Path $repo -Parent) 'consoles\PlayStation\PS3 ISO Utilities'
+    $runtime = Join-Path $Destination 'runtime\ps3iso'
+    $msvcSource = Join-Path $source 'windows-msvc-source'
+    $files = @{
+        'extractps3iso.exe' = 'F8E25A55C5CCEFF384B2B3B890F9FB7926FF5A1BA7B08AEE54A800F7250611A9'
+        'makeps3iso.exe' = '1EF8D40D6F0386E7A08A9ABBFA794ED8EB0E2FFA0E7F694E1FCC83298818C579'
+        'ps3iso-utils-277db7de-source.tar.gz' = 'CD86F6F77DFD4A2606ADC3C10EFEF6565168D2BABB34C3A559DFBC5F7128F521'
+    }
+    New-Item -ItemType Directory -Path $runtime -Force | Out-Null
+    foreach ($name in $files.Keys) {
+        $path = Join-Path $source $name
+        if (-not (Test-Path -LiteralPath $path)) {
+            throw "Verified PS3 ISO utility component is missing: $path"
+        }
+        $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToUpperInvariant()
+        if ($actual -ne $files[$name]) {
+            throw "PS3 ISO utility checksum mismatch for $name. Expected $($files[$name]); found $actual."
+        }
+        Copy-Item -LiteralPath $path -Destination $runtime -Force
+    }
+    foreach ($name in @('extractps3iso.c', 'makeps3iso.c', 'dirent.h')) {
+        $path = Join-Path $msvcSource $name
+        if (-not (Test-Path -LiteralPath $path)) {
+            throw "Corresponding locally-built PS3 utility source is missing: $path"
+        }
+    }
+    Copy-Item -LiteralPath $msvcSource -Destination (Join-Path $runtime 'windows-msvc-source') -Recurse -Force
+    Copy-Item -LiteralPath (Join-Path $source 'BUILD-NOTES.txt') -Destination $runtime -Force
+    @(
+        'PS3 ISO utilities by Bucanero / Estwald (Hermes), upstream tag 277db7de.'
+        'Source archive is included here; it contains the corresponding GPL-3.0 source and license.'
+        'Upstream: https://github.com/bucanero/ps3iso-utils/releases/tag/277db7de'
+        'extractps3iso.exe SHA256: F8E25A55C5CCEFF384B2B3B890F9FB7926FF5A1BA7B08AEE54A800F7250611A9 (locally rebuilt from GPL source with MSVC after the upstream MinGW build failed with Windows loader error 623)'
+        'makeps3iso.exe SHA256: 1EF8D40D6F0386E7A08A9ABBFA794ED8EB0E2FFA0E7F694E1FCC83298818C579 (locally rebuilt from GPL source with MSVC after the upstream MinGW build failed with Windows loader error 623)'
+        'Source archive SHA256: CD86F6F77DFD4A2606ADC3C10EFEF6565168D2BABB34C3A559DFBC5F7128F521'
+    ) | Set-Content -LiteralPath (Join-Path $runtime 'THIRD-PARTY-NOTICE.txt') -Encoding utf8
+}
+
 function Write-ReleaseManifest($Name, $Config, $Destination) {
-    $ps3Status = 'PS3 PKG creation is unavailable: CFW2OFW prepares compatible disc games for the OFW data-transfer workflow and make_npdata only encrypts/decrypts EDAT/SDAT data; neither is a general JB-folder-to-installable-PKG builder. PS3DK remains retired. ISO/folder conversions require compatible external CLI tools.'
     @(
         "Digital Forge release: $Name"
         "Platform: $($Config.Os)"
         "Architecture: $($Config.Architecture)"
-        "PS3 PKG creation: unavailable until a replacement package builder is verified"
-        "PS3 ISO and folder conversions: require compatible configured CLI tools"
-        "PS3 dependency status: $ps3Status"
+        "PS3 ISO / JB folder: extractps3iso and makeps3iso from Bucanero/Estwald tag 277db7de were rebuilt locally with MSVC because the upstream MinGW binaries failed to start on this Windows host (loader error 623). Synthetic JB→ISO→JB and split-ISO extraction round-trip tests passed. Upstream GPL source archive, modified MSVC-compatible C source, Win32 directory shim, build notes and GPL-3.0 license are included in runtime/ps3iso. Real commercial game ISO testing was not performed; encrypted ISOs require separate handling."
+        "PS3 PKG creation and extraction: unavailable. Digital Forge does not create installable game PKGs from disc dumps or bypass PS3 package licensing/signing. No supported safe PKG extractor is bundled. Existing package files are not converted; the retired PS3DK implementation remains removed."
         "PS4 base and update GP4 generation / FPKG creation: OrbisPkgTool v1.0.0 is bundled after verifying its official release archive SHA256 (C19FB3905AECEA32BCA41CD13D5EBA1172B82056AF5DCD69FCFECBF866BC8D63). Synthetic packaging fixtures with non-launchable dummy eboot files passed the Digital Forge backend, GP4 generation, FPKG creation, 8-stage validation, and metadata readback for both base and update categories. Windows error 623 is avoided by using this managed builder instead of the patched publisher; no real-game or PS4 hardware result is claimed."
-        "PS5 ItemzFlow: receives a TAR stream, and the generic archive workflow can extract TAR files when 7-Zip is configured. The ItemzFlow backend validates/copies an already prepared native game folder. PS5-specific dump normalization and makefself/executable preparation are not implemented, so a raw TAR is not yet transformed into a ready-to-launch ItemzFlow game folder."
+        "PS5 ItemzFlow: plain TAR input is detected for PS5, extracted with path traversal/link/special-file rejection, scanned for one game root, validated, and copied to the Itemzflow output. Synthetic TAR extraction, traversal rejection, metadata checks, and export tests passed. This requires an already prepared native eboot.bin, sce_sys/param.json, matching param.sfo, and sce_module. Digital Forge does not fake-sign or transform executables; raw dumps missing these prepared files are rejected. No physical PS5 launch test was performed."
         "PS5 AnyPS5: debug-FIH-PKG/folder preparation is bundled and synthetic-fixture tested; output still requires the separate AnyPS5 relinker and is not presented as playable."
         "Build source: $($Config.CargoTarget) / cargo build --release --locked"
     ) | Set-Content -LiteralPath (Join-Path $Destination 'RELEASE-MANIFEST.txt') -Encoding utf8
@@ -169,24 +206,28 @@ foreach ($name in $names) {
 
     $runtime = Join-Path $destination 'runtime\ps3'
     if ($config.Os -eq 'Windows' -and $config.Architecture -eq 'x86_64') {
-        Copy-ManagedTree (Join-Path $repo 'vendor\ps3-pkg-module') (Join-Path $runtime 'ps3-pkg-module')
+        foreach ($retired in @('ps3-pkg-module', 'ps3dk')) {
+            $retiredPath = Join-Path $runtime $retired
+            if (Test-Path -LiteralPath $retiredPath) {
+                Remove-Item -LiteralPath $retiredPath -Recurse -Force
+            }
+        }
         Copy-ManagedTree (Join-Path $repo 'vendor\ps3-update-dl') (Join-Path $runtime 'ps3-update-dl')
         Copy-AnyPS5Runtime $destination
         Copy-OrbisPkgToolRuntime $destination
+        Copy-PS3IsoRuntime $destination
         Write-ReleaseManifest $name $config $destination
     } elseif ($config.Os -eq 'Windows') {
-        foreach ($managed in @('ps3-update-dl', 'ps3dk')) {
+        foreach ($managed in @('ps3-update-dl', 'ps3-pkg-module', 'ps3dk')) {
             $managedPath = Join-Path $runtime $managed
             if (Test-Path -LiteralPath $managedPath) {
                 Remove-Item -LiteralPath $managedPath -Recurse -Force
             }
         }
-        Copy-ManagedTree (Join-Path $repo 'vendor\ps3-pkg-module') (Join-Path $runtime 'ps3-pkg-module')
         Write-ReleaseManifest $name $config $destination
     } else {
         # Keep the established Python sources/extractor available, but do not
         # copy the Windows-only embedded Python runtime into Linux releases.
-        Copy-ManagedTree (Join-Path $repo 'vendor\ps3-pkg-module') (Join-Path $runtime 'ps3-pkg-module')
         Write-ReleaseManifest $name $config $destination
     }
     Write-Host "Deployed $name to $destination"

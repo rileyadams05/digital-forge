@@ -138,6 +138,123 @@ fn ps3_detects_numbered_666_split_iso_parts_and_missing_parts() {
 }
 
 #[test]
+#[ignore = "requires the checksum-pinned PS3 ISO utilities through DIGITAL_FORGE_TOOL_PS3_EXTRACT_ISO and DIGITAL_FORGE_TOOL_PS3_GENERATE_ISO"]
+fn ps3_iso_utilities_round_trip_synthetic_jb_game_and_split_iso() {
+    use std::sync::atomic::AtomicBool;
+
+    let extract = std::env::var_os("DIGITAL_FORGE_TOOL_PS3_EXTRACT_ISO")
+        .map(std::path::PathBuf::from)
+        .expect("set DIGITAL_FORGE_TOOL_PS3_EXTRACT_ISO to extractps3iso.exe");
+    let generate = std::env::var_os("DIGITAL_FORGE_TOOL_PS3_GENERATE_ISO")
+        .map(std::path::PathBuf::from)
+        .expect("set DIGITAL_FORGE_TOOL_PS3_GENERATE_ISO to makeps3iso.exe");
+    assert!(extract.is_file());
+    assert!(generate.is_file());
+
+    fn sfo(entries: &[(&str, &str)]) -> Vec<u8> {
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+        let mut table = Vec::new();
+        for (key, value) in entries {
+            let key_offset = keys.len() as u16;
+            keys.extend_from_slice(key.as_bytes());
+            keys.push(0);
+            let value_offset = values.len() as u32;
+            values.extend_from_slice(value.as_bytes());
+            values.push(0);
+            let value_length = values.len() as u32 - value_offset;
+            while values.len() % 4 != 0 {
+                values.push(0);
+            }
+            table.extend_from_slice(&key_offset.to_le_bytes());
+            table.extend_from_slice(&0x0204u16.to_le_bytes());
+            table.extend_from_slice(&value_length.to_le_bytes());
+            table.extend_from_slice(&value_length.to_le_bytes());
+            table.extend_from_slice(&value_offset.to_le_bytes());
+        }
+        let key_table_offset = 20u32 + table.len() as u32;
+        let value_table_offset = key_table_offset + keys.len() as u32;
+        let mut result = b"\0PSF".to_vec();
+        result.extend_from_slice(&0x00000101u32.to_le_bytes());
+        result.extend_from_slice(&key_table_offset.to_le_bytes());
+        result.extend_from_slice(&value_table_offset.to_le_bytes());
+        result.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        result.extend_from_slice(&table);
+        result.extend_from_slice(&keys);
+        result.extend_from_slice(&values);
+        result
+    }
+
+    let workspace = TempWorkspace::new("ps3_iso_roundtrip").unwrap();
+    let game = workspace.root.join("synthetic_game");
+    fs::create_dir_all(game.join("PS3_GAME/USRDIR")).unwrap();
+    fs::write(
+        game.join("PS3_GAME/PARAM.SFO"),
+        sfo(&[
+            ("TITLE", "Digital Forge fixture"),
+            ("TITLE_ID", "BCUS12345"),
+        ]),
+    )
+    .unwrap();
+    fs::write(
+        game.join("PS3_GAME/USRDIR/fixture.dat"),
+        b"synthetic PS3 fixture payload",
+    )
+    .unwrap();
+    fs::write(game.join("PS3_DISC.SFB"), b"synthetic disc marker").unwrap();
+
+    let backend = get_backend_for_id("ps3_iso").unwrap();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let no_progress = Arc::new(|_: ProgressUpdate| {});
+    let jb_input = detection(
+        Platform::PlayStation3,
+        SourceFormat::Ps3JbFolder,
+        vec![game.clone()],
+    );
+    let iso_output = workspace.root.join("first_iso");
+    let built = backend
+        .convert(
+            &jb_input,
+            TargetFormat::Ps3Iso,
+            &iso_output,
+            no_progress.clone(),
+            cancelled.clone(),
+        )
+        .unwrap();
+    assert!(built.output_path.is_file());
+    assert!(fs::metadata(&built.output_path).unwrap().len() > 0);
+
+    let split_dir = workspace.root.join("split");
+    fs::create_dir_all(&split_dir).unwrap();
+    let iso_bytes = fs::read(&built.output_path).unwrap();
+    let midpoint = iso_bytes.len() / 2;
+    let part0 = split_dir.join("synthetic.iso.0");
+    let part1 = split_dir.join("synthetic.iso.1");
+    fs::write(&part0, &iso_bytes[..midpoint]).unwrap();
+    fs::write(&part1, &iso_bytes[midpoint..]).unwrap();
+    let split_input = detection(
+        Platform::PlayStation3,
+        SourceFormat::Ps3SplitIso,
+        vec![part0, part1],
+    );
+    let extracted_output = workspace.root.join("split_extracted");
+    let extracted = backend
+        .convert(
+            &split_input,
+            TargetFormat::Ps3JbFolder,
+            &extracted_output,
+            no_progress,
+            cancelled,
+        )
+        .unwrap();
+    assert!(extracted.output_path.join("PS3_GAME/PARAM.SFO").is_file());
+    assert_eq!(
+        fs::read(extracted.output_path.join("PS3_GAME/USRDIR/fixture.dat")).unwrap(),
+        b"synthetic PS3 fixture payload"
+    );
+}
+
+#[test]
 fn ps4_pkg_input_recommends_ps4_folder_over_pkg() {
     let input = detection(Platform::PlayStation4, SourceFormat::Ps4FakePkg, Vec::new());
     let choices = ForgeUi::build_format_choices(
