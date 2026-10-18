@@ -17,7 +17,7 @@ def main():
     if output.exists():
         raise SystemExit(f"Refusing to overwrite existing output directory: {output}")
     output.mkdir(parents=True)
-    for item in (".nojekyll", "index.html", "about.html", "compatibility.html", "formats.html"):
+    for item in (".nojekyll", "CNAME", "index.html", "about.html", "compatibility.html", "formats.html"):
         shutil.copy2(SOURCE / item, output / item)
     for directory in ("assets", "guides"):
         shutil.copytree(SOURCE / directory, output / directory)
