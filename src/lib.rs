@@ -1,0 +1,9 @@
+#[path = "../consoles/Xbox/ISO2GOD/src/executable/mod.rs"]
+pub mod executable;
+pub mod forge;
+#[path = "../consoles/Xbox/ISO2GOD/src/game_list/mod.rs"]
+pub mod game_list;
+#[path = "../consoles/Xbox/ISO2GOD/src/god/mod.rs"]
+pub mod god;
+#[path = "../consoles/Xbox/ISO2GOD/src/iso/mod.rs"]
+pub mod iso;

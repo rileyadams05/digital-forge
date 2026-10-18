@@ -1,0 +1,183 @@
+name: Release
+run-name: ${{ inputs.artifact_run_id && format('Recover final release step from run {0}', inputs.artifact_run_id) || 'Release' }}
+
+on:
+  # Rebuild the selected branch without changing any existing tag or release.
+  # Download the verified artifacts and replace release assets separately.
+  workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: "Recover only the final step using this run's successful builds (leave blank to build)"
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  actions: read
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify source
+    if: ${{ !inputs.artifact_run_id }}
+    runs-on: windows-latest
+    steps:
+      - name: Configure Git initial branch
+        run: git config --global init.defaultBranch master
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; Node 24
+        with:
+          lfs: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run optimized tests
+        run: cargo test --release --locked --bin iso2god
+
+  build:
+    name: ${{ matrix.package_name }}
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: win-x64.exe
+            package_name: win-x64
+            linux_packages: ""
+          - runner: windows-latest
+            target: i686-pc-windows-msvc
+            binary: win-x86.exe
+            package_name: win-x86
+            linux_packages: ""
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary: linux-x64
+            package_name: linux-x64
+            linux_packages: musl-tools
+          - runner: ubuntu-latest
+            target: i686-unknown-linux-gnu
+            binary: linux-x86
+            package_name: linux-x86
+            linux_packages: gcc-multilib
+
+    steps:
+      - name: Configure Git initial branch
+        run: git config --global init.defaultBranch master
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; Node 24
+        with:
+          lfs: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes ${{ matrix.linux_packages }}
+
+      - name: Build release executable
+        shell: pwsh
+        run: |
+          cargo build --release --locked --target "${{ matrix.target }}" --bin iso2god
+          New-Item -ItemType Directory -Path release-output -Force | Out-Null
+          $sourceName = if ($IsWindows) { "iso2god.exe" } else { "iso2god" }
+          $source = Join-Path "target/${{ matrix.target }}/release" $sourceName
+          Copy-Item -LiteralPath $source -Destination "release-output/${{ matrix.binary }}"
+
+      - name: Mark Linux executable
+        if: runner.os == 'Linux'
+        run: chmod 755 "release-output/${{ matrix.binary }}"
+
+      - name: Smoke test executable
+        shell: pwsh
+        run: '& "release-output/${{ matrix.binary }}" --ai-status'
+
+      - name: Smoke test background automation
+        shell: pwsh
+        run: python tests/automation_smoke.py "release-output/${{ matrix.binary }}"
+
+      - name: Store release asset
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1; Node 24
+        with:
+          name: ${{ matrix.package_name }}
+          path: release-output/${{ matrix.binary }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish complete release
+    needs: build
+    if: ${{ !cancelled() && (needs.build.result == 'success' || inputs.artifact_run_id != '') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate existing build run
+        if: ${{ inputs.artifact_run_id != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.artifact_run_id }}
+        run: |
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]] || { echo "Invalid source run ID"; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > source-run.json
+          jq -e --arg repo "$GITHUB_REPOSITORY" '
+            .repository.full_name == $repo and
+            .head_repository.full_name == $repo and
+            .path == ".github/workflows/release.yml" and
+            (.event == "push" or .event == "workflow_dispatch") and
+            .status == "completed"
+          ' source-run.json
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?filter=all&per_page=100" > source-jobs.json
+          jq -e '
+            [.[].jobs[]] | group_by(.name) | map(max_by(.id)) as $jobs |
+            ["Verify source", "win-x64", "win-x86", "linux-x64", "linux-x86"] |
+            all(. as $name | any($jobs[]; .name == $name and .conclusion == "success"))
+          ' source-jobs.json
+          echo "Reusing successful builds from run $SOURCE_RUN_ID; no source checks or builds rerun." >> "$GITHUB_STEP_SUMMARY"
+
+      # The current Node download action emits DEP0005 internally. The
+      # supported GitHub CLI downloads the same verified artifacts directly.
+      - name: Download all release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.artifact_run_id || github.run_id }}
+        run: |
+          mkdir -p release-assets
+          for artifact in win-x64 win-x86 linux-x64 linux-x86; do
+            gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              --name "$artifact" --dir release-assets
+          done
+
+      - name: Verify complete release asset set
+        shell: bash
+        run: |
+          for asset in win-x64.exe win-x86.exe linux-x64 linux-x86; do
+            test -s "release-assets/$asset"
+          done
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 4
+          sha256sum release-assets/*
+
+      - name: Publish GitHub release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3; Node 24
+        with:
+          files: release-assets/*
+          fail_on_unmatched_files: true

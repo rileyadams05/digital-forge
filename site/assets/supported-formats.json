@@ -1,0 +1,25 @@
+{
+  "consoles": [
+    { "name": "PlayStation 1", "formats": "BIN, CUE", "convertType": "PKG (PS3) / FPKG (PS4)", "testingStatus": "Testing planned via PlayStation 3 / PlayStation 4" },
+    { "name": "PlayStation 2", "formats": "ISO, BIN, CUE", "convertType": "PKG (PS3) / FPKG (PS4)", "testingStatus": "Testing planned via PlayStation 3 / PlayStation 4" },
+    { "name": "PlayStation Portable (PSP)", "formats": "ISO, CSO, ZSO, DAX, PBP", "convertType": "PKG (PS3) / FPKG (PS4)", "testingStatus": "Testing planned via PlayStation 3 / PlayStation 4" },
+    { "name": "PlayStation 3", "formats": "ISO, JB folder, PKG", "convertType": "PKG", "testingStatus": "Tested on hardware" },
+    { "name": "PlayStation Vita", "formats": "NoNpDrm folder", "convertType": "—", "testingStatus": "Emulator testing planned (Vita3K)" },
+    { "name": "PlayStation 4", "formats": "PKG, Itemzflow", "convertType": "FPKG", "testingStatus": "Tested on hardware" },
+    { "name": "PlayStation 5", "formats": "Debug FIH PKG, Itemzflow game folder", "convertType": "Itemzflow folder preparation / AnyPS5 PC preparation", "testingStatus": "Testing planned with AnyPS5 and a PS5 emulator; no game output verified" },
+    { "name": "Original Xbox", "formats": "XISO", "convertType": "GOD (Xbox 360)", "testingStatus": "Testing planned via Xbox 360 for backward-compatible titles" },
+    { "name": "Xbox 360", "formats": "ISO, GOD", "convertType": "GOD", "testingStatus": "Tested on hardware" },
+    { "name": "Nintendo Entertainment System", "formats": "NES", "convertType": "—", "testingStatus": "Emulator testing planned (Mesen)" },
+    { "name": "Game Boy", "formats": "GB", "convertType": "—", "testingStatus": "Emulator testing planned (SameBoy)" },
+    { "name": "Super Nintendo", "formats": "SFC", "convertType": "—", "testingStatus": "Emulator testing planned (Snes9x)" },
+    { "name": "Nintendo 64", "formats": "Z64", "convertType": "—", "testingStatus": "Emulator testing planned (simple64 / ares)" },
+    { "name": "Game Boy Color", "formats": "GBC", "convertType": "—", "testingStatus": "Emulator testing planned (SameBoy)" },
+    { "name": "Game Boy Advance", "formats": "GBA", "convertType": "—", "testingStatus": "Emulator testing planned (mGBA)" },
+    { "name": "Nintendo DS", "formats": "NDS", "convertType": "—", "testingStatus": "Emulator testing planned (melonDS)" },
+    { "name": "Wii", "formats": "ISO, WBFS", "convertType": "—", "testingStatus": "Emulator testing planned (Dolphin)" },
+    { "name": "Nintendo 3DS", "formats": "CIA", "convertType": "—", "testingStatus": "Emulator testing planned (Azahar)" },
+    { "name": "Wii U", "formats": "WUP", "convertType": "—", "testingStatus": "Emulator testing planned (Cemu)" },
+    { "name": "Nintendo Switch", "formats": "NSP, XCI", "convertType": "—", "testingStatus": "PC emulator testing planned" }
+  ],
+  "note": "A planned test is not a compatibility result. Emulator tests will use Digital Forge output; passing an emulator test does not confirm original-console compatibility. PS5 has not been tested with AnyPS5 or a PS5 emulator yet."
+}

@@ -1,0 +1,156 @@
+name: Game compatibility failure
+description: Report a game that was tested and failed or had a reproducible in-game problem.
+title: "[Game failure] "
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Search existing issues before filing. Use this form only for a game that
+        was tested and failed or had a reproducible in-game problem. Successful
+        test results are not submitted as GitHub Issues. Include the console, game
+        ID, game and update versions, and test environment.
+        Please attach
+        the Digital Forge game log (the shareable diagnostic report). On Windows, find
+        logs under %APPDATA%\iso2god\logs; the shareable report ends in
+        .share.txt beside the operation log. Review it for personal information
+        first; do not attach game or PKG files. This form cannot verify attachments,
+        so a maintainer may ask you to add the report. A Digital Forge processing
+        failure is not a game compatibility failure and should not use this form.
+  - type: input
+    id: platform
+    attributes:
+      label: Console / platform
+      description: Enter the console or system name from the Digital Forge catalog.
+      placeholder: PlayStation 4, Xbox 360, Nintendo 64, Sega Dreamcast, etc.
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game title
+      placeholder: Game name
+    validations:
+      required: true
+  - type: input
+    id: game_id
+    attributes:
+      label: Game ID / title ID
+      placeholder: CUSAxxxxx, BLUSxxxxx, or N/A
+    validations:
+      required: true
+  - type: input
+    id: game_version
+    attributes:
+      label: Base game version
+      placeholder: 1.00 or unknown
+    validations:
+      required: true
+  - type: input
+    id: test_environment
+    attributes:
+      label: Console or emulator and version
+      description: Name the system and version used to test this game's failure.
+      placeholder: Console, emulator and version
+    validations:
+      required: false
+  - type: input
+    id: update_version
+    attributes:
+      label: Update version
+      placeholder: 1.29, none, or unknown
+    validations:
+      required: true
+  - type: input
+    id: input_format
+    attributes:
+      label: Input format
+      placeholder: Itemzflow dump, PKG, ISO, folder, etc.
+    validations:
+      required: true
+  - type: input
+    id: app_version
+    attributes:
+      label: Digital Forge version
+      placeholder: Version shown by the application
+    validations:
+      required: true
+  - type: input
+    id: operating_system
+    attributes:
+      label: Operating system
+      description: Include version and architecture if known.
+      placeholder: Windows 11 24H2 x64
+    validations:
+      required: true
+  - type: dropdown
+    id: error_type
+    attributes:
+      label: Error type
+      options:
+        - Detection or validation
+        - Missing or invalid metadata
+        - Tool not found or failed
+        - Extraction or conversion failed
+        - Package build or merge failed
+        - Output verification failed
+        - Storage or working directory
+        - Other / unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: observed_result
+    attributes:
+      label: Observed game failure
+      options:
+        - Game failed to launch
+        - Game crashed during play
+        - Reproducible gameplay, graphics, or audio problem
+        - Other reproducible in-game failure
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: What happened?
+      description: Include the exact error and the result you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: 1. Select the input…
+    validations:
+      required: true
+  - type: dropdown
+    id: storage
+    attributes:
+      label: Workspace storage
+      options:
+        - Internal fixed drive
+        - External or removable drive
+        - Unknown
+    validations:
+      required: true
+  - type: input
+    id: working_directory
+    attributes:
+      label: Working directory or storage details
+      description: Share drive type and a redacted directory description if relevant. Do not include personal account names or secrets.
+      placeholder: Internal SSD, workspace on D: drive, or not sure
+    validations:
+      required: false
+  - type: textarea
+    id: troubleshooting
+    attributes:
+      label: Troubleshooting already attempted
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: diagnostic_log
+    attributes:
+      label: Diagnostic log
+      options:
+        - label: I understand a Digital Forge game log is required, have attached or linked it, and reviewed it for personal information.
+          required: true

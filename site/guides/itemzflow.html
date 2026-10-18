@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Organize an Itemzflow PS4 game and update dump for Digital Forge's automatic folder intake.">
+  <title>Itemzflow PS4 Guide · Digital Forge</title>
+  <link rel="stylesheet" href="../assets/site.css">
+  <style>
+    .guide-shot{margin:24px 0 30px;padding:16px;background:#171d23;border:1px solid #2b343d;border-radius:12px}
+    .guide-shot img{display:block;width:auto;max-width:100%;height:auto;margin:0 auto;border-radius:6px}
+    .guide-shot figcaption{margin-top:12px;color:#a4afb9;font-size:13px;line-height:1.55}
+    .guide-layout{overflow-x:auto;padding:16px;background:#12171d;border:1px solid #2b343d;border-radius:10px;color:#d8dee3;font:13px/1.7 'DM Mono',monospace}
+  </style>
+</head>
+<body>
+<main class="page">
+  <p class="eyebrow">PS4 · ITEMZFLOW INTAKE</p>
+  <h1>Itemzflow dump guide</h1>
+  <p class="lead">Itemzflow normally places the base-game and update folders at the root of its selected dump drive. Put them together in one <code>itemzflow</code> folder, then drop that folder into Digital Forge for automatic detection and processing.</p>
+  <p><span class="chip">Base game + update</span><span class="chip">One game per import</span><span class="chip">Automatic intake</span></p>
+
+  <h2>1. Find the Itemzflow dump</h2>
+  <p>With Itemzflow's default USB dump path, the game and patch folders are created directly at the root of the drive. If the dump path was changed in Itemzflow settings, look in that selected location instead. Use <strong>Dump All</strong> when you want both the base game and its installed update.</p>
+  <figure class="guide-shot">
+    <img src="../assets/itemzflow-drive-root.png" alt="Example USB drive root containing a CUSA game folder, its matching CUSA patch folder, an itemzflow logs folder, and two optional complete marker files">
+    <figcaption><strong>Example Itemzflow output:</strong> the base folder and matching <code>-patch</code> folder sit beside each other. Itemzflow may also create an <code>itemzflow</code> folder for logs. The small <code>.complete</code> files are optional markers.</figcaption>
+  </figure>
+
+  <h2>2. Check the optional logs</h2>
+  <p>When present, the <code>itemzflow</code> folder may contain log files such as <code>daemon.log</code>, <code>dumper.log</code> and <code>itemzflow_app.log</code>. Their presence varies. Digital Forge does not require these logs to identify or process the game.</p>
+  <figure class="guide-shot">
+    <img src="../assets/itemzflow-log-files.png" alt="Example Itemzflow folder listing daemon.log, dumper.log, and itemzflow_app.log">
+    <figcaption>These are example Itemzflow log files. Keep them with the dump if you want them included in the intake folder; the game can still be processed when no logs are available.</figcaption>
+  </figure>
+
+  <h2>3. Prepare one folder for Digital Forge</h2>
+  <p>Digital Forge's automatic Itemzflow intake expects the base game and its matching update to be immediate contents of the same parent folder. If Itemzflow has already made an <code>itemzflow</code> folder, move the base and patch folders into it alongside any logs. If that folder is not there, create one and move the game folders into it.</p>
+  <pre class="guide-layout"><code>itemzflow/
+├── CUSAxxxxx/                  # base game
+├── CUSAxxxxx-patch/            # matching update
+├── CUSAxxxxx.complete          # optional, zero-byte marker
+├── CUSAxxxxx-patch.complete    # optional, zero-byte marker
+├── daemon.log                  # optional
+├── dumper.log                  # optional
+└── itemzflow_app.log           # optional</code></pre>
+  <p>The <code>.complete</code> markers shown above are empty files, not folders. They are not needed by Digital Forge, so you may leave them in place or delete them. Keep the two game folders directly inside <code>itemzflow</code>; do not put them inside a separate logs subfolder.</p>
+
+  <h2>4. Drop the folder into Digital Forge</h2>
+  <ol>
+    <li>Launch Digital Forge and drag the prepared <code>itemzflow</code> folder into the application.</li>
+    <li>Digital Forge reads the game metadata, identifies the title and console, and matches the base game with its update.</li>
+    <li>Review the detected game and versions, then continue with the proposed Itemzflow workflow.</li>
+    <li>Choose the workspace drive and final output location when prompted. These storage choices remain manual.</li>
+    <li>Digital Forge handles the remaining preparation, packaging, merge and verification steps, and reports any step that needs attention.</li>
+  </ol>
+  <p>This folder arrangement is required for Digital Forge's automatic Itemzflow intake. Without the base and matching update together under one parent folder, you would need to select and organize the inputs manually.</p>
+
+  <h2>What Digital Forge does with the dump</h2>
+  <p>Digital Forge reads the dump folders and their metadata, validates that the base and update belong together, and stages working copies for its PS4 FPKG workflow. It does not dump content from the console, install the result on a PS4, or modify the original source folders. Use game data you own or are authorized to use.</p>
+
+  <h2>Large game storage</h2>
+  <div class="callout"><strong>Large Game Detected</strong><br>For games larger than 50 GB, Digital Forge recommends using your PC's internal storage for workspace and packaging. Some large builds may fail when processed directly on an external drive. Choose the workspace and output drive that suit your available space.</div>
+
+  <h2>Troubleshooting</h2>
+  <ul>
+    <li><strong>No dump detected:</strong> confirm the <code>CUSAxxxxx</code> game folder is directly inside the dropped <code>itemzflow</code> folder and contains readable game data.</li>
+    <li><strong>Update not matched:</strong> confirm the update folder is named with the same title ID followed by <code>-patch</code>.</li>
+    <li><strong>No logs or completion markers:</strong> this is fine; both are optional. Digital Forge validates the actual game and update folders.</li>
+    <li><strong>Not enough workspace space:</strong> select another workspace drive or free space, and keep the original dump intact.</li>
+    <li><strong>Package step fails:</strong> follow the named diagnostic step and confirm the required packaging tools are available.</li>
+  </ul>
+
+  <h2>Official resources</h2>
+  <p><a href="https://github.com/LightningMods/Itemzflow">Itemzflow on GitHub</a> · <a href="https://github.com/rileyadams05/digital-forge">Digital Forge source</a> · <a href="../compatibility.html">Digital Forge reports</a></p>
+</main>
+<footer><span>Guide for preparing an Itemzflow PS4 dump for Digital Forge.</span><a href="../index.html">Search ↗</a></footer>
+</body>
+</html>

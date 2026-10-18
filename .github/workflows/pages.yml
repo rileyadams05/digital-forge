@@ -1,0 +1,79 @@
+name: Deploy Digital Forge website
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "site/**"
+      - "site-api/**"
+      - ".github/workflows/pages.yml"
+  pull_request:
+    paths:
+      - "site/**"
+      - "site-api/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Validate and package website
+    runs-on: ubuntu-latest
+    env:
+      DIGITAL_FORGE_SUCCESS_API: ${{ vars.DIGITAL_FORGE_SUCCESS_API }}
+    permissions:
+      contents: read
+      pages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Check search JavaScript syntax
+        run: node --check site/assets/search.js
+      - name: Check success-report JavaScript syntax
+        run: node --check site/assets/success-reports.js
+      - name: Check success API worker syntax
+        run: node --input-type=module --check < site-api/src/index.mjs
+      - name: Check search query routing and failure states
+        run: node site/scripts/search-smoke.mjs
+      - name: Validate website pages and local links
+        run: python3 site/scripts/validate.py
+      - name: Build clean static website artifact
+        run: python3 site/scripts/build.py "$RUNNER_TEMP/digital-forge-pages"
+      - name: Validate deployable website artifact
+        run: python3 site/scripts/validate.py "$RUNNER_TEMP/digital-forge-pages"
+      - name: Configure GitHub Pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v5
+      - name: Require the success-report API endpoint before publishing
+        if: github.event_name != 'pull_request' && vars.DIGITAL_FORGE_SUCCESS_API == ''
+        run: |
+          echo "::error::Set the DIGITAL_FORGE_SUCCESS_API repository variable to the deployed Cloudflare Worker URL before publishing this website update."
+          exit 1
+      - name: Upload static website artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digital-forge-pages
+
+  deploy:
+    name: Deploy website to GitHub Pages
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages artifact
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Report deployed website URL
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: echo "Website deployed to ${PAGE_URL}" >> "$GITHUB_STEP_SUMMARY"

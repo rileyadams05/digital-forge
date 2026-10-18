@@ -1,0 +1,29 @@
+name: Deploy successful-test reporting API
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "site-api/**"
+      - ".github/workflows/success-api.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy private GitHub reporting Worker
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Check Worker syntax
+        run: node --check site-api/src/index.mjs
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: site-api
+          command: deploy

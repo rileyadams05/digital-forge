@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101419">
+  <meta name="description" content="Digital Forge guides, game identification and community processing reports.">
+  <link rel="canonical" href="https://digital-forge.vortex-prime-emu.com/">
+  <title>Digital Forge</title>
+  <link rel="stylesheet" href="assets/site.css?v=20261017-home-links-3">
+</head>
+<body>
+  <main class="hero">
+    <p class="eyebrow">MULTI-CONSOLE GAME TOOLS & COMMUNITY SUPPORT</p>
+    <h1>Digital Forge</h1>
+    <p class="lead">Practical guides and community reports for the formats Digital Forge supports.</p>
+    <form id="search-form" class="search" role="search">
+      <label for="search-mode">Filter</label>
+      <select id="search-mode" name="mode" aria-describedby="search-help">
+        <option value="" selected disabled hidden>Select filter</option>
+        <option value="guides">Guides</option>
+        <option value="games">Games</option>
+        <option value="emulators">Emulators</option>
+      </select>
+      <button id="home-button" class="home-control" type="button" aria-label="Home">Home</button>
+      <label class="sr-only" for="site-search">Search game title or ID</label>
+      <input id="site-search" name="q" type="search" placeholder="Choose a filter to start…" autocomplete="off" aria-describedby="search-help" disabled>
+    </form>
+    <p id="search-help" class="search-help">Choose Guides, Games, or Emulators to begin. Press Enter to search.</p>
+    <section id="search-results" class="results" aria-live="polite" aria-atomic="true" hidden></section>
+  </main>
+  <footer><a class="button secondary" href="about.html">What is Digital Forge? <span aria-hidden="true">→</span></a><a class="button secondary" href="formats.html">Supported formats <span aria-hidden="true">↗</span></a><a class="button secondary" href="https://github.com/rileyadams05/digital-forge" target="_blank" rel="noopener noreferrer">GitHub project <span aria-hidden="true">↗</span></a></footer>
+  <script src="assets/search.js?v=20261017-public-ready-1"></script>
+</body>
+</html>

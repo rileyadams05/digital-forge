@@ -1,0 +1,1 @@
+window.DF_SUCCESS_API = "__SUCCESS_API_URL__";
