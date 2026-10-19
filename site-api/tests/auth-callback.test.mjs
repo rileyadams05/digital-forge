@@ -60,8 +60,15 @@ test("form-encoded OAuth errors are handled without parsing exceptions", async (
 
 test("valid JSON OAuth response completes the callback and creates a session", async () => {
   const { state, cookie } = await startLogin();
-  globalThis.fetch = async (url) => {
+  globalThis.fetch = async (url, init) => {
     if (String(url) === "https://github.com/login/oauth/access_token") {
+      assert.equal(init.method, "POST");
+      assert.equal(init.headers["content-type"], "application/x-www-form-urlencoded");
+      const form = new URLSearchParams(init.body);
+      assert.equal(form.get("client_id"), "test-client-id");
+      assert.equal(form.get("client_secret"), "test-client-secret");
+      assert.equal(form.get("code"), "test-code");
+      assert.equal(form.get("redirect_uri"), env.GITHUB_APP_CALLBACK_URL);
       return Response.json({ access_token: "test-user-token" });
     }
     if (String(url) === "https://api.github.com/user") {

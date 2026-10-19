@@ -134,10 +134,16 @@ async function authCallback(env, request) {
   try { cookieValue = decodeURIComponent(cookieState); } catch {}
   const code = url.searchParams.get("code");
   if (!state || !code || cookieValue !== stateToken) return new Response("GitHub sign-in could not be verified. Please try again.", { status: 400, headers: { "Set-Cookie": clearState, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+  const tokenRequest = new URLSearchParams({
+    client_id: env.GITHUB_APP_CLIENT_ID,
+    client_secret: env.GITHUB_APP_CLIENT_SECRET,
+    code,
+    redirect_uri: env.GITHUB_APP_CALLBACK_URL || (apiBase(request) + "/auth/callback")
+  });
   const response = await fetch("https://github.com/login/oauth/access_token", {
-    method: "POST", headers: { Accept: "application/json", "content-type": "application/json" },
-    body: JSON.stringify({ client_id: env.GITHUB_APP_CLIENT_ID, client_secret: env.GITHUB_APP_CLIENT_SECRET, code,
-      redirect_uri: env.GITHUB_APP_CALLBACK_URL || (apiBase(request) + "/auth/callback") })
+    method: "POST",
+    headers: { Accept: "application/vnd.github+json", "content-type": "application/x-www-form-urlencoded" },
+    body: tokenRequest.toString()
   });
   const grant = await oauthPayload(response);
   if (!response.ok || grant?.error || !grant?.access_token) return new Response("GitHub sign-in failed. Please try again.", { status: 401, headers: { "Set-Cookie": clearState, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
