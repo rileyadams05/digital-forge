@@ -237,4 +237,4 @@ document.querySelectorAll(".query").forEach(button => button.addEventListener("c
   input.value = button.dataset.query || "";
   run(input.value, mode?.value || "games");
 }));
-if (input?.value && mode?.value && mode.value !== "emulators") run(input.value);
+if (input?.value && mode?.value) run(input.value);
