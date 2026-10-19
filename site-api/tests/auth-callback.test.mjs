@@ -64,6 +64,7 @@ test("Versioned GitHub JSON profile response completes the callback and creates 
     if (String(url) === "https://github.com/login/oauth/access_token") {
       assert.equal(init.method, "POST");
       assert.equal(init.headers["content-type"], "application/x-www-form-urlencoded");
+      assert.equal(init.headers["User-Agent"], "Digital-Forge");
       const form = new URLSearchParams(init.body);
       assert.equal(form.get("client_id"), "test-client-id");
       assert.equal(form.get("client_secret"), "test-client-secret");
@@ -72,6 +73,7 @@ test("Versioned GitHub JSON profile response completes the callback and creates 
       return Response.json({ access_token: "test-user-token" });
     }
     if (String(url) === "https://api.github.com/user") {
+      assert.equal(init.headers["User-Agent"], "Digital-Forge");
       return new Response(JSON.stringify({ id: 123, login: "test-user" }), {
         headers: { "content-type": "application/vnd.github.v3+json; charset=utf-8" },
       });
