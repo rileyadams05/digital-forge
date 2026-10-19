@@ -80,7 +80,7 @@ async function oauthPayload(response) {
 }
 async function githubProfile(response) {
   const contentType = response.headers.get("content-type") || "";
-  if (!contentType.includes("application/json")) return null;
+  if (!/^application\/(?:json|vnd\.github\+json)(?:\s*;|$)/i.test(contentType)) return null;
   try { return await response.json(); } catch { return null; }
 }
 async function appJwt(env) {
@@ -295,3 +295,4 @@ export default {
     }
   }
 };
+
