@@ -6,7 +6,7 @@
     <meta name="description" content="Check Digital Forge game test status and submit successful game tests for review.">
   <link rel="canonical" href="https://digital-forge.vortex-prime-emu.com/compatibility.html">
   <title>Compatibility &amp; Support · Digital Forge</title>
-  <link rel="stylesheet" href="assets/site.css?v=20261020-report-layout-1">
+  <link rel="stylesheet" href="assets/site.css?v=20261020-report-layout-2">
 </head>
 <body>
   <main class="page">
@@ -18,8 +18,6 @@
     <h2>Search a game</h2>
     <p>Choose <strong>Games</strong> on the home page and enter the game's ID. The website checks the approved successful-test list and searches GitHub Issues for failure reports. A failure report takes priority unless a newer successful test has been approved and published.</p>
 
-    <h2>Successful tests</h2>
-    <p>Successful results appear in the public catalog only after a project reviewer approves and merges the report. Do not submit successful tests as GitHub Issues.</p>
 
     <div class="report-layout">
     <section id="success-report" aria-labelledby="success-report-title">
@@ -30,14 +28,10 @@
       <form id="success-report-form" class="report-form" hidden>
         <label for="report-game-id">Game ID</label>
         <input id="report-game-id" name="game_id" required maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_-]{2,31}" autocomplete="off">
-        <label for="report-console">Console or short name</label>
-        <input id="report-console" name="console" required maxlength="48" placeholder="PS4, Xbox 360, 3DS…">
         <label for="report-format">Format or workflow</label>
         <input id="report-format" name="format" required maxlength="48" placeholder="PKG, FPKG, Itemzflow…">
-        <label for="report-version">Digital Forge version</label>
-        <input id="report-version" name="digital_forge_version" maxlength="48" placeholder="Optional">
-        <label for="report-environment">Test environment</label>
-        <input id="report-environment" name="environment" maxlength="100" placeholder="Console model and system software (optional)">
+        <label for="report-description">Description</label>
+        <textarea id="report-description" name="description" required maxlength="1000" rows="5" placeholder="Describe your experience with the game and conversion workflow."></textarea>
         <label for="report-log">Digital Forge game log</label>
         <div id="report-drop-zone" class="log-drop-zone" role="button" tabindex="0" aria-describedby="report-log-hint">
           <strong>Choose or drop your game log</strong>
@@ -60,15 +54,12 @@
 
     <ul>
       <li><strong>Unknown:</strong> no approved successful test or matching failure report is recorded.</li>
-      <li><strong>Tested working:</strong> an approved website record confirms a successful test. Version and test environment may affect results.</li>
+      <li><strong>Tested working:</strong> an approved report confirms a successful test for the listed format or workflow.</li>
       <li><strong>Problem reported:</strong> a matching failure issue exists. We recommend not using the game until it has been fixed and a newer successful test is recorded.</li>
     </ul>
 
-    <h2>Emulator compatibility sources</h2>
-    <p>Digital Forge does not maintain emulator game-compatibility ratings. For emulator-specific results, check the emulator project's own compatibility list or issue tracker. Those results describe performance in that emulator; they do not verify Digital Forge processing or original-console compatibility.</p>
-    <p><a href="https://docs.google.com/spreadsheets/d/e/2PACX-1vRE0jjiK_aldpICoy5kVQlpk2f81Vo6P4p9vfg4d7YoTOoDlH4PQHoXjTD2F7SdN8SSBLoEAItaIqQo/pubhtml">DuckStation compatibility list</a> · <a href="https://pcsx2.net/compat/">PCSX2 compatibility list</a> · <a href="https://rpcs3.net/compatibility">RPCS3 compatibility list</a> · <a href="https://github.com/shadps4-compatibility/shadps4-game-compatibility/issues">shadPS4 game reports</a> · <a href="https://vita3k.org/compatibility.html?lang=eng">Vita3K compatibility list</a> · <a href="https://kahmenah.github.io/azahar-compatibility-list/">Azahar compatibility list</a> · <a href="https://xemu.app/">xemu compatibility list</a> · <a href="https://github.com/xenia-canary/game-compatibility/issues">Xenia Canary game reports</a></p>
   </main>
-  <footer><span>Successful tests are reviewed in repository pull requests; issues are for failures.</span><a href="index.html">Search ↗</a></footer>
+  <footer><a href="index.html">Home ↗</a></footer>
   <script src="assets/success-config.js?v=1"></script>
   <script src="assets/success-reports.js?v=3"></script>
 </body>

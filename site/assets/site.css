@@ -74,3 +74,15 @@
 .report-form input.sr-only{width:1px;height:1px;padding:0;margin:-1px;border:0}
 @media(max-width:820px){.report-layout{grid-template-columns:1fr;gap:12px}.failure-report-card{position:static;margin-top:8px}}
 @media(prefers-color-scheme:light){.log-drop-zone{background:#fff;border-color:#aab5bc}.log-drop-zone:hover,.log-drop-zone.is-dragging{background:#b8550008}}
+
+.report-form textarea{width:100%;min-width:0;resize:vertical;border:1px solid var(--line);border-radius:8px;background:#12171d;color:var(--text);padding:11px 12px;font:inherit;line-height:1.5}
+.report-form textarea:focus{outline:2px solid #8996a2;outline-offset:2px}
+.home-hero{flex:0;margin-top:clamp(48px,9vh,95px);margin-bottom:28px}
+.guide-library{width:min(900px,calc(100% - 40px));margin:0 auto 46px}
+.guide-library h2{font-size:20px;margin:0 0 12px}
+.guide-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.guide-card{margin:0}
+.guide-card .tag{margin:0 0 7px}
+.guide-card h3{margin:0 0 5px}
+.guide-card p{margin:0 0 8px}
+@media(max-width:600px){.guide-library{width:calc(100% - 32px)}.guide-grid{grid-template-columns:1fr}}

@@ -5,7 +5,7 @@ JavaScript with no package installation or static-site generator.
 
 ## Pages and guides
 
-- `index.html` is the short search-first homepage.
+- `index.html` contains Guides and Games search plus direct links to every published guide.
 - `about.html` contains the project overview.
 - `formats.html` shows one compact list of the format/workflow folder names currently under `consoles/Nintendo`, `consoles/PlayStation` and `consoles/Xbox`.
 - `guides/` contains focused guides. Add a new standalone HTML guide there, then add its title,
@@ -30,7 +30,7 @@ accepted only when they point to the specific upstream host needed by that resul
   are reported separately from game status. Successful test results are submitted through the
   GitHub sign-in flow on the compatibility page and become public only after a reviewer merges the
   generated pull request. The server-side setup is documented in site-api/README.md.
-- The compatibility page links directly to emulator projects' own compatibility lists and issue trackers. Digital Forge does not maintain emulator ratings or imply that an emulator result verifies a Digital Forge conversion or original-console behavior.
+- The compatibility page is for community test reports. It does not include emulator compatibility links or maintain emulator ratings. Visitors seeking emulator-specific information should use the relevant emulator project's own compatibility sources.
 - The GitHub failure form opens for the visitor to review and submit; the website never uploads a
   diagnostic log or creates an issue automatically. Successful results are not filed as issues.
 

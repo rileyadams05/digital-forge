@@ -16,7 +16,7 @@ const guides = [
   { title: "FPKG guide", url: "guides/fpkg.html", platforms: ["ps4"], formats: ["fpkg", "fake pkg", "fakepkg", "fake package"], keys: [], summary: "PS4 Fake PKG inputs, configured packaging tools, validation, merge path and limitations." },
   { title: "PKG guide", url: "guides/pkg.html", platforms: ["ps3", "ps4"], formats: ["pkg", ".pkg", "package"], keys: ["retail pkg", "ps3 pkg", "ps4 pkg"], summary: "PlayStation package formats and platform-specific processing limits." },
   { title: "ISO2GOD guide", url: "guides/iso2god.html", platforms: ["xbox360"], formats: ["iso2god", "god", "games on demand"], keys: ["xbox 360 iso", "xbox360"], summary: "Xbox 360 ISO and Games on Demand workflow, inputs, storage and troubleshooting." },
-  { title: "Troubleshooting and compatibility reports", url: "compatibility.html", platforms: [], formats: [], keys: ["troubleshooting", "diagnostic", "log", "issue", "github", "report", "failure", "error", "compatibility"], summary: "Search prior reports, preserve version details and submit a report with a reviewed diagnostic log." }
+  { title: "Troubleshooting and compatibility reports", url: "compatibility.html", platforms: [], formats: [], keys: ["troubleshooting", "diagnostic", "log", "issue", "github", "report", "failure", "error", "compatibility"], summary: "Check game status and submit a report with a description and reviewed diagnostic log." }
 ];
 const consoleNames = [
   { id: "ps4", aliases: ["ps4", "playstation 4"] },

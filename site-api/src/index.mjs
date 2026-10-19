@@ -2,7 +2,7 @@ const enc = new TextEncoder();
 const dec = new TextDecoder("utf-8", { fatal: true });
 const ID_RE = /^[A-Z0-9][A-Z0-9_-]{2,31}$/;
 const FIELD_RE = /^[\p{L}\p{N} ._+()/-]{1,48}$/u;
-const OPTIONAL_RE = /^[\p{L}\p{N} ._+()/-]{0,100}$/u;
+const DESCRIPTION_MAX = 1000;
 const MAX_LOG = 5 * 1024 * 1024;
 function base64(bytes) {
   let binary = "";
@@ -211,9 +211,8 @@ async function openPullRequest(env, record, logBytes, fileName, user, token) {
     + "/blob/" + branch + "/" + logPath;
   const body = [
     "## Successful game test submission", "", "Merging this pull request publishes the test result on the website.", "",
-    "- **Game ID:** " + record.game_id, "- **Console:** " + record.console, "- **Format:** " + record.format,
-    "- **Digital Forge version:** " + (record.digital_forge_version || "Not provided"),
-    "- **Test environment:** " + (record.environment || "Not provided"), "- **Tested at (UTC):** " + record.tested_at,
+    "- **Game ID:** " + record.game_id, "- **Format / workflow:** " + record.format, "- **Tested at (UTC):** " + record.tested_at,
+    "", "### Description", "", ...record.description.split("\n").map(line => "> " + line),
     "- **Submitted by:** @" + user.login, "- **Game log:** [Review the attached log](" + logUrl + ")",
     "", "The game log is attached to this pull request in the public Digital Forge repository, so it is visible before and after merge. Review it for private information before submitting."
   ].join("\n");
@@ -230,11 +229,11 @@ async function submit(env, request) {
     const form = await request.formData();
     const id = String(form.get("game_id") || "").trim().toUpperCase();
     if (!ID_RE.test(id)) throw new Error("Game ID is missing or invalid.");
-    const console = field(form, "console", "Console", FIELD_RE);
-    const format = field(form, "format", "Format", FIELD_RE);
-    const version = String(form.get("digital_forge_version") || "").trim().slice(0, 48);
-    const environment = String(form.get("environment") || "").trim().slice(0, 100);
-    if ((version && !FIELD_RE.test(version)) || !OPTIONAL_RE.test(environment)) throw new Error("Version or test environment contains unsupported characters.");
+    const format = field(form, "format", "Format or workflow", FIELD_RE);
+    const description = String(form.get("description") || "").replace(/\r\n?/g, "\n").trim();
+    if (!description || description.length > DESCRIPTION_MAX || /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(description)) {
+      throw new Error("Description is required and must be 1 to 1000 characters.");
+    }
     const file = form.get("game_log");
     if (!(file instanceof File) || file.size < 1 || file.size > MAX_LOG) throw new Error("Attach a non-empty game log no larger than 5 MB.");
     if (!/\.(log|txt)$/i.test(file.name) || !["text/plain", "application/octet-stream", ""].includes(file.type)) throw new Error("Attach a .log or .txt game log.");
@@ -256,8 +255,7 @@ async function submit(env, request) {
       const catalog = JSON.parse(dec.decode(catalogBytes));
       if (Array.isArray(catalog.games) && catalog.games.some(item => String(item.game_id).toUpperCase() === id)) return json({ error: "A result already exists for " + id + "." }, 409);
     } else if (catalogResponse.status !== 404) throw new Error("Could not verify the existing result catalog (GitHub HTTP " + catalogResponse.status + ").");
-    const record = { game_id: id, status: "working", tested_at: new Date().toISOString(), console, format,
-      ...(version ? { digital_forge_version: version } : {}), ...(environment ? { environment } : {}),
+    const record = { game_id: id, status: "working", tested_at: new Date().toISOString(), format, description,
       submitted_by: user.login };
     const pr = await openPullRequest(env, record, log, file.name, user, token);
     return json({ ok: true, pull_request: pr.html_url, number: pr.number, game_id: id }, 201);

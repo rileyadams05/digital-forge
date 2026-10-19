@@ -95,7 +95,7 @@ def main():
                     errors.append(f"Missing anchor: {relative} -> {link}")
 
     home = (ROOT / "index.html").read_text(encoding="utf-8")
-    required_home_terms = ("Digital Forge", 'id="search-form"', 'id="search-mode"', 'id="site-search"', 'value="guides"', 'value="games"', "What is Digital Forge?", "Submit a successful test", 'href="compatibility.html#success-report"')
+    required_home_terms = ("Digital Forge", 'id="search-form"', 'id="search-mode"', 'id="site-search"', 'value="guides"', 'value="games"', "What is Digital Forge?", "Submit a successful test", 'href="compatibility.html#success-report"', 'id="guide-library"', 'href="guides/itemzflow.html"', 'href="guides/fpkg.html"', 'href="guides/pkg.html"', 'href="guides/iso2god.html"')
     for term in required_home_terms:
         if term not in home:
             errors.append(f"Homepage is missing required content: {term}")
@@ -126,10 +126,14 @@ def main():
     if 'id="success-report-form"' not in (ROOT / "compatibility.html").read_text(encoding="utf-8"):
         errors.append("Compatibility page is missing its successful test submission form")
     compatibility_page = (ROOT / "compatibility.html").read_text(encoding="utf-8")
-    if "Select <strong>Emulators</strong>" in compatibility_page or "Emulators searches" in compatibility_page:
-        errors.append("Compatibility guidance must direct users to emulator project lists, not a site emulator search")
-    if "the emulator project's own compatibility list" not in compatibility_page:
-        errors.append("Compatibility page should direct users to emulator projects' own compatibility sources")
+    obsolete_report_copy = ("<h2>Successful tests</h2>", "Emulator compatibility sources", "DuckStation compatibility list",
+                            'id="report-console"', 'id="report-version"', 'id="report-environment"')
+    if any(marker in compatibility_page for marker in obsolete_report_copy):
+        errors.append("Compatibility page contains removed success copy, emulator links or old report fields")
+    if '<textarea id="report-description" name="description" required' not in compatibility_page:
+        errors.append("Successful test form must collect a description")
+    if "Version and test environment may affect results" in compatibility_page:
+        errors.append("Compatibility status copy should not mention removed version and environment fields")
 
     formats_page = (ROOT / "formats.html").read_text(encoding="utf-8")
     if ('src="assets/formats.js?v=12"' not in formats_page
@@ -187,6 +191,11 @@ def main():
         errors.append("Compatibility page is missing its report and failure layout")
     if 'id="report-drop-zone"' not in compatibility or 'id="report-log-hint"' not in compatibility:
         errors.append("Compatibility page is missing its accessible game-log drop zone")
+    api_source = (ROOT.parent / "site-api" / "src" / "index.mjs").read_text(encoding="utf-8")
+    if 'field(form, "description", "Description"' not in api_source or 'description,' not in api_source:
+        errors.append("Reporting API must accept and publish the report description")
+    if 'field(form, "console"' in api_source or 'form.get("environment")' in api_source or 'form.get("digital_forge_version")' in api_source:
+        errors.append("Reporting API should not require the removed report fields")
 
     issue_template_path = ROOT.parent / ".github" / "ISSUE_TEMPLATE" / "compatibility-report.yml"
     if issue_template_path.exists():

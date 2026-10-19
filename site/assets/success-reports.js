@@ -16,6 +16,11 @@
   }
   const query = new URLSearchParams(location.search);
   if (query.has("game") && idField) idField.value = query.get("game").slice(0, 32);
+  for (const [parameter, fieldId] of [["format", "report-format"], ["description", "report-description"]]) {
+    const value = query.get(parameter);
+    const input = document.getElementById(fieldId);
+    if (value && input) input.value = value.slice(0, input.maxLength || 1000);
+  }
 
   const setStatus = (message, error = false) => {
     status.textContent = message;
