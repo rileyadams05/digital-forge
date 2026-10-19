@@ -243,12 +243,12 @@ async function submit(env, request) {
     const resultsPath = repositoryResultsPath(env);
     const base = env.GITHUB_BASE_BRANCH || "main", path = resultsPath + "/" + id + ".json";
     const exists = await fetch(repo + "/contents/" + path + "?ref=" + encodeURIComponent(base), {
-      headers: { Accept: "application/vnd.github+json", Authorization: "Bearer " + token, "X-GitHub-Api-Version": "2022-11-28" }
+      headers: { Accept: "application/vnd.github+json", Authorization: "Bearer " + token, "User-Agent": "Digital-Forge", "X-GitHub-Api-Version": "2022-11-28" }
     });
     if (exists.ok) return json({ error: "A result already exists for " + id + "." }, 409);
     if (exists.status !== 404) throw new Error("Could not verify existing results (GitHub HTTP " + exists.status + ").");
     const catalogResponse = await fetch(repo + "/contents/" + resultsPath + ".json?ref=" + encodeURIComponent(base), {
-      headers: { Accept: "application/vnd.github+json", Authorization: "Bearer " + token, "X-GitHub-Api-Version": "2022-11-28" }
+      headers: { Accept: "application/vnd.github+json", Authorization: "Bearer " + token, "User-Agent": "Digital-Forge", "X-GitHub-Api-Version": "2022-11-28" }
     });
     if (catalogResponse.ok) {
       const metadata = await catalogResponse.json();
