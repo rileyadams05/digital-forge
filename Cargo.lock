@@ -1651,6 +1651,7 @@ dependencies = [
  "mega",
  "num_enum",
  "openssl",
+ "quick-xml",
  "rayon",
  "reqwest 0.12.15",
  "rfd",

@@ -11,6 +11,7 @@ pub mod platform;
 pub mod profile;
 #[path = "../../consoles/PlayStation/FPKG/src/forge/ps4.rs"]
 pub mod ps4;
+pub mod ps4_updates;
 pub mod ps5;
 pub mod transfer;
 pub mod ui;

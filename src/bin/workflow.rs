@@ -1496,13 +1496,7 @@ fn run_ps4_ingest_flow(
 
     let base_group = build_content_group_from_sources("Base Game", &classified.base_sources)?;
     let update_group = build_content_group_from_sources("Update", &classified.update_sources)?;
-    let dlc_group = FolderContentGroup {
-        label: "DLC",
-        directory: PathBuf::new(),
-        sources: Vec::new(),
-        multipart_sets: Vec::new(),
-        ordinary_items: 0,
-    };
+    let dlc_group = build_content_group_from_sources("DLC", &classified.dlc_sources)?;
 
     let result =
         run_ps4_package_groups_flow(&base_group, &update_group, &dlc_group, target_workflow, log);
@@ -3371,10 +3365,6 @@ fn run_ps4_package_groups_flow(
         }
     } else {
         // === Workflow for Fake PKG (FPKG) and Retail PKG ===
-        ensure!(
-            dlc.is_empty(),
-            "Additional content cannot be folded into a base-game PKG generically and will not be emitted as part of the base-game package."
-        );
         if target_format == iso2god::forge::TargetFormat::Ps4RetailPkg {
             ensure!(
                 update.is_empty(),
@@ -3526,22 +3516,48 @@ fn run_ps4_package_groups_flow(
                 base_meta.content_id = source_content_id;
             }
         }
+        if base_meta.title_id.is_empty()
+            && let Some(title_id) =
+                iso2god::forge::detector::title_id_from_content_id(&base_meta.content_id)
+        {
+            base_meta.title_id = title_id;
+        }
         if target_format == iso2god::forge::TargetFormat::Ps4RetailPkg {
             ensure!(
                 !base_meta.is_fake,
                 "the selected input is an FPKG; Digital Forge will not relabel it as a retail PKG"
             );
         }
-        let title_id = if base_meta.title_id.is_empty() {
-            "CUSA00000".to_string()
-        } else {
-            base_meta.title_id.clone()
-        };
+        ensure!(
+            !base_meta.title_id.is_empty(),
+            "PS4 base package does not provide a usable Title ID"
+        );
+        let title_id = base_meta.title_id.clone();
+
+        let mut selected_update_source = update.sources.first().cloned();
+        if update.sources.len() > 1 {
+            bail!(
+                "Select one compatible PS4 update version per conversion; multiple updates are not merged automatically."
+            );
+        }
+        if selected_update_source.is_none()
+            && target_format == iso2god::forge::TargetFormat::Ps4FakePkg
+            && !base_meta.title_id.is_empty()
+        {
+            selected_update_source = discover_and_download_ps4_update(
+                &base_meta,
+                &app_settings::config_dir()?.join("ps4-update-cache"),
+                &tool,
+                &package_progress,
+                cancelled.clone(),
+                log,
+            )?;
+        }
 
         let final_pkg = job_ws.root.join(format!("{title_id}.pkg"));
 
-        if !update.is_empty() {
-            let upd_source = &update.sources[0];
+        let mut additional_outputs = Vec::new();
+        if let Some(upd_source) = selected_update_source.as_deref() {
             let upd_ext = job_ws.root.join("upd_pkg_ext");
             fs::create_dir_all(&upd_ext)?;
             let upd_payload = extract_or_resolve_payload_with_progress(
@@ -3645,6 +3661,16 @@ fn run_ps4_package_groups_flow(
             let update_meta = read_ps4_pkg_metadata(&tool, &upd_pkg)?;
             ensure_ps4_base_update_compatible(&base_meta, &update_meta)?;
             ensure!(
+                update_meta.category.eq_ignore_ascii_case("gp")
+                    || update_meta
+                        .package_type
+                        .to_ascii_lowercase()
+                        .contains("patch"),
+                "selected update package is not identified as PS4 patch content (CATEGORY={} TYPE={})",
+                update_meta.category,
+                update_meta.package_type
+            );
+            ensure!(
                 !base_meta.content_id.is_empty(),
                 "PS4 base package has no CONTENT_ID; cannot safely build a merged package"
             );
@@ -3654,8 +3680,6 @@ fn run_ps4_package_groups_flow(
             )?;
             run_orbis_merge(
                 &tool,
-                &find_orbis_pub_cmd()
-                    .context("PS4 Publishing Tools orbis-pub-cmd.exe was not found")?,
                 &base_pkg,
                 &upd_pkg,
                 &final_pkg,
@@ -3671,6 +3695,25 @@ fn run_ps4_package_groups_flow(
                 fs::copy(&base_pkg, &final_pkg)?;
             }
             package_progress.render(95, "Verifying", "Checking final package");
+        }
+
+        // DLC packages are independent add-on packages. Never fold add-on
+        // files into the base application's GP4. Each input is inspected,
+        // extracted, associated with the selected Title ID, then built and
+        // validated as a separate pkg_ps4_ac_data package.
+        if target_format == iso2god::forge::TargetFormat::Ps4FakePkg {
+            for (index, dlc_source) in dlc.sources.iter().enumerate() {
+                let output = build_ps4_dlc_fpkg(
+                    &tool,
+                    dlc_source,
+                    &base_meta,
+                    &job_ws.root,
+                    index,
+                    cancelled.clone(),
+                    package_progress.clone(),
+                )?;
+                additional_outputs.push(output);
+            }
         }
 
         // Clean up intermediate packages and build GP4s now that final_pkg exists
@@ -3690,7 +3733,7 @@ fn run_ps4_package_groups_flow(
             was_passthrough: false,
             title_id: Some(title_id.clone()),
             title_name: None,
-            aux_files: Vec::new(),
+            aux_files: additional_outputs,
             tool_report: None,
         };
 
@@ -4078,7 +4121,6 @@ fn walkdir_file_count(path: &Path) -> usize {
 
 fn run_orbis_merge(
     tool: &Path,
-    publisher: &Path,
     base_pkg: &Path,
     update_pkg: &Path,
     output_pkg: &Path,
@@ -4103,7 +4145,6 @@ fn run_orbis_merge(
         .arg("--validate")
         .arg("--work-dir")
         .arg(&work_root);
-    merge_command.arg("--publisher").arg(publisher);
     // Do not pass empty metadata overrides.  The merge tool can read the
     // authoritative values from the base package's param.sfo; an empty
     // override otherwise masks those values and creates a blank TITLE_ID.
@@ -4116,7 +4157,7 @@ fn run_orbis_merge(
     if !base_meta.content_id.trim().is_empty() {
         merge_command.arg("--content-id").arg(&base_meta.content_id);
     }
-    // Preserve this job on failure, including publisher GP4 and extracted assets.
+    // Preserve this job on failure, including the generated GP4 and extracted assets.
     // The normal success path removes the marker and retains automatic cleanup.
     let diagnostic_root = temp_ws
         .ancestors()
@@ -4603,6 +4644,7 @@ struct Ps4PkgMetadata {
     title: String,
     title_id: String,
     content_id: String,
+    version: String,
     category: String,
     package_type: String,
     passcode_status: String,
@@ -4655,7 +4697,15 @@ fn orange_progress_bar(percent: u8, width: usize) -> String {
 
 #[cfg(test)]
 mod ps4_package_progress_tests {
-    use super::{Ordering, Ps4PackageProgress, orange_progress_bar, render_orbis_merge_progress};
+    use super::{
+        Ordering, Ps4PackageProgress, Ps4PkgMetadata, build_ps4_dlc_fpkg, find_orbis_pkg_tool,
+        orange_progress_bar, read_ps4_pkg_metadata, render_orbis_merge_progress,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn first_nonzero_percent_is_visible_and_width_stays_fixed() {
@@ -4671,6 +4721,362 @@ mod ps4_package_progress_tests {
         assert_eq!(progress.last_percent.load(Ordering::Relaxed), 96);
         render_orbis_merge_progress(&progress, "[Validating: 8] complete");
         assert_eq!(progress.last_percent.load(Ordering::Relaxed), 99);
+    }
+
+    #[test]
+    fn synthetic_dlc_folder_builds_a_separate_valid_addon_fpkg() {
+        let Some(tool) = find_orbis_pkg_tool() else {
+            eprintln!(
+                "OrbisPkgTool runtime is unavailable; skipping synthetic DLC package integration test"
+            );
+            return;
+        };
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".tmp")
+            .join(format!("ps4_dlc_fpkg_integration_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let dlc = root.join("dlc_source");
+        fs::create_dir_all(dlc.join("sce_sys")).unwrap();
+        fs::write(
+            dlc.join("dlc_content.dat"),
+            b"synthetic DLC content fixture",
+        )
+        .unwrap();
+        let sfo = dlc.join("sce_sys").join("param.sfo");
+        let created = Command::new(&tool)
+            .arg("sfo")
+            .arg("create")
+            .arg(&sfo)
+            .arg("--title")
+            .arg("Synthetic DLC")
+            .arg("--title-id")
+            .arg("CUSA00001")
+            .arg("--content-id")
+            .arg("EP0001-CUSA00001_00-TESTDLC000000001")
+            .arg("--category")
+            .arg("ac")
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        let base = Ps4PkgMetadata {
+            path: root.join("base.pkg"),
+            title: "Synthetic Base".to_owned(),
+            title_id: "CUSA00001".to_owned(),
+            content_id: "EP0001-CUSA00001_00-TESTBASE00000001".to_owned(),
+            version: "01.00".to_owned(),
+            category: "gd".to_owned(),
+            package_type: "Game".to_owned(),
+            passcode_status: "verified".to_owned(),
+            is_fake: true,
+        };
+        let output = build_ps4_dlc_fpkg(
+            &tool,
+            &dlc,
+            &base,
+            &root,
+            0,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Ps4PackageProgress::default()),
+        )
+        .unwrap();
+        let metadata = read_ps4_pkg_metadata(&tool, &output).unwrap();
+        assert_eq!(metadata.title_id, "CUSA00001");
+        assert_eq!(metadata.category, "ac");
+        assert_eq!(metadata.package_type, "Dlc");
+        assert!(output.is_file());
+        let extracted = root.join("dlc_recovered");
+        let extraction = Command::new(&tool)
+            .arg("extract")
+            .arg(&output)
+            .arg(&extracted)
+            .output()
+            .unwrap();
+        assert!(
+            extraction.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&extraction.stdout),
+            String::from_utf8_lossy(&extraction.stderr)
+        );
+        assert_eq!(
+            fs::read(extracted.join("Image0/dlc_content.dat")).unwrap(),
+            b"synthetic DLC content fixture"
+        );
+        let extracted_sfo = extracted.join("Sc0/param.sfo");
+        assert_eq!(
+            iso2god::forge::FormatDetector::read_sfo_key(&extracted_sfo, "TITLE_ID").as_deref(),
+            Some("CUSA00001")
+        );
+        assert_eq!(
+            iso2god::forge::FormatDetector::read_sfo_category(&extracted_sfo).as_deref(),
+            Some("ac")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn synthetic_base_folder_builds_and_extracts_a_valid_game_fpkg() {
+        let Some(tool) = find_orbis_pkg_tool() else {
+            eprintln!(
+                "OrbisPkgTool runtime is unavailable; skipping synthetic base FPKG integration test"
+            );
+            return;
+        };
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".tmp")
+            .join(format!("ps4_base_fpkg_integration_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let game = root.join("game_source");
+        fs::create_dir_all(game.join("sce_sys")).unwrap();
+        fs::write(game.join("eboot.bin"), b"synthetic eboot fixture").unwrap();
+        fs::write(game.join("content.dat"), b"synthetic game fixture").unwrap();
+        let sfo = game.join("sce_sys").join("param.sfo");
+        let created = Command::new(&tool)
+            .arg("sfo")
+            .arg("create")
+            .arg(&sfo)
+            .arg("--title")
+            .arg("Synthetic Game")
+            .arg("--title-id")
+            .arg("CUSA00002")
+            .arg("--content-id")
+            .arg("EP0001-CUSA00002_00-TESTGAME00000001")
+            .arg("--category")
+            .arg("gd")
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        let gp4 = root.join("base.gp4");
+        let output = root.join("CUSA00002.pkg");
+        let generated = Command::new(&tool)
+            .arg("gp4gen")
+            .arg(&game)
+            .arg("--title-id")
+            .arg("CUSA00002")
+            .arg("--content-id")
+            .arg("EP0001-CUSA00002_00-TESTGAME00000001")
+            .arg("--out")
+            .arg(&gp4)
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&generated.stdout),
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let built = Command::new(&tool)
+            .arg("build")
+            .arg(&gp4)
+            .arg(&game)
+            .arg("--out")
+            .arg(&output)
+            .arg("--validate")
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&built.stdout),
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let validation = Command::new(&tool)
+            .arg("validate")
+            .arg("--fake-tolerant")
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert!(
+            validation.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&validation.stdout),
+            String::from_utf8_lossy(&validation.stderr)
+        );
+        let metadata = read_ps4_pkg_metadata(&tool, &output).unwrap();
+        assert_eq!(metadata.title_id, "CUSA00002");
+        assert_eq!(metadata.category, "gd");
+        let extracted = root.join("game_recovered");
+        let extraction = Command::new(&tool)
+            .arg("extract")
+            .arg(&output)
+            .arg(&extracted)
+            .output()
+            .unwrap();
+        assert!(
+            extraction.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&extraction.stdout),
+            String::from_utf8_lossy(&extraction.stderr)
+        );
+        assert_eq!(
+            fs::read(extracted.join("Image0/eboot.bin")).unwrap(),
+            b"synthetic eboot fixture"
+        );
+        let extracted_sfo = extracted.join("Sc0/param.sfo");
+        assert_eq!(
+            iso2god::forge::FormatDetector::read_sfo_key(&extracted_sfo, "TITLE_ID").as_deref(),
+            Some("CUSA00002")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn synthetic_base_and_update_merge_without_external_publisher() {
+        let Some(tool) = find_orbis_pkg_tool() else {
+            eprintln!(
+                "OrbisPkgTool runtime is unavailable; skipping synthetic merge integration test"
+            );
+            return;
+        };
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".tmp")
+            .join(format!(
+                "ps4_update_merge_integration_{}",
+                std::process::id()
+            ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let content_id = "EP0001-CUSA00003_00-TESTGAME00000001";
+
+        let build_fixture =
+            |folder: &str, category: &str, version: &str, payload_name: &str, payload: &[u8]| {
+                let game = root.join(folder);
+                fs::create_dir_all(game.join("sce_sys")).unwrap();
+                fs::write(game.join("eboot.bin"), b"synthetic eboot fixture").unwrap();
+                fs::write(game.join(payload_name), payload).unwrap();
+                let sfo = game.join("sce_sys/param.sfo");
+                let mut create = Command::new(&tool);
+                create
+                    .arg("sfo")
+                    .arg("create")
+                    .arg(&sfo)
+                    .arg("--title")
+                    .arg("Synthetic Merge Game")
+                    .arg("--title-id")
+                    .arg("CUSA00003")
+                    .arg("--content-id")
+                    .arg(content_id)
+                    .arg("--category")
+                    .arg(category);
+                let result = create.output().unwrap();
+                assert!(
+                    result.status.success(),
+                    "{}{}",
+                    String::from_utf8_lossy(&result.stdout),
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                let set_version = Command::new(&tool)
+                    .arg("sfo")
+                    .arg("set")
+                    .arg(&sfo)
+                    .arg("APP_VER")
+                    .arg(version)
+                    .output()
+                    .unwrap();
+                assert!(
+                    set_version.status.success(),
+                    "{}{}",
+                    String::from_utf8_lossy(&set_version.stdout),
+                    String::from_utf8_lossy(&set_version.stderr)
+                );
+                let gp4 = root.join(format!("{folder}.gp4"));
+                let pkg = root.join(format!("{folder}.pkg"));
+                let mut generate = Command::new(&tool);
+                generate
+                    .arg("gp4gen")
+                    .arg(&game)
+                    .arg("--title-id")
+                    .arg("CUSA00003")
+                    .arg("--content-id")
+                    .arg(content_id);
+                if category == "gp" {
+                    generate.arg("--patch");
+                }
+                let generated = generate.arg("--out").arg(&gp4).output().unwrap();
+                assert!(
+                    generated.status.success(),
+                    "{}{}",
+                    String::from_utf8_lossy(&generated.stdout),
+                    String::from_utf8_lossy(&generated.stderr)
+                );
+                let built = Command::new(&tool)
+                    .arg("build")
+                    .arg(&gp4)
+                    .arg(&game)
+                    .arg("--out")
+                    .arg(&pkg)
+                    .arg("--validate")
+                    .output()
+                    .unwrap();
+                assert!(
+                    built.status.success(),
+                    "{}{}",
+                    String::from_utf8_lossy(&built.stdout),
+                    String::from_utf8_lossy(&built.stderr)
+                );
+                pkg
+            };
+
+        let base_pkg = build_fixture("base", "gd", "01.00", "base_only.dat", b"base survives");
+        let update_pkg = build_fixture(
+            "update",
+            "gp",
+            "01.05",
+            "updated_content.dat",
+            b"updated content",
+        );
+        let merged_pkg = root.join("merged.pkg");
+        let merged = Command::new(&tool)
+            .arg("merge")
+            .arg(&base_pkg)
+            .arg(&update_pkg)
+            .arg("--out")
+            .arg(&merged_pkg)
+            .arg("--validate")
+            .arg("--work-dir")
+            .arg(root.join("merge_work"))
+            .output()
+            .unwrap();
+        assert!(
+            merged.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&merged.stdout),
+            String::from_utf8_lossy(&merged.stderr)
+        );
+        let metadata = read_ps4_pkg_metadata(&tool, &merged_pkg).unwrap();
+        assert_eq!(metadata.title_id, "CUSA00003");
+        assert_eq!(metadata.content_id, content_id);
+        assert_eq!(metadata.category, "gd");
+        let extracted = root.join("merged_recovered");
+        let extraction = Command::new(&tool)
+            .arg("extract")
+            .arg(&merged_pkg)
+            .arg(&extracted)
+            .output()
+            .unwrap();
+        assert!(
+            extraction.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&extraction.stdout),
+            String::from_utf8_lossy(&extraction.stderr)
+        );
+        assert_eq!(
+            fs::read(extracted.join("Image0/base_only.dat")).unwrap(),
+            b"base survives"
+        );
+        assert_eq!(
+            fs::read(extracted.join("Image0/updated_content.dat")).unwrap(),
+            b"updated content"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -4764,6 +5170,7 @@ fn read_ps4_pkg_metadata(tool: &Path, package: &Path) -> Result<Ps4PkgMetadata, 
     let title = field("Title");
     let title_id = field("Title ID");
     let content_id = field("Content ID");
+    let version = field("App version");
     let category = field("Category");
     let package_type = field("Type");
     let passcode_status = field("Passcode");
@@ -4784,11 +5191,365 @@ fn read_ps4_pkg_metadata(tool: &Path, package: &Path) -> Result<Ps4PkgMetadata, 
         title,
         title_id,
         content_id,
+        version,
         category,
         package_type,
         passcode_status,
         is_fake,
     })
+}
+
+fn discover_and_download_ps4_update(
+    base: &Ps4PkgMetadata,
+    cache_root: &Path,
+    tool: &Path,
+    progress: &Ps4PackageProgress,
+    cancelled: Arc<AtomicBool>,
+    log: &mut OperationLog,
+) -> Result<Option<PathBuf>, Error> {
+    let title_id = &base.title_id;
+    println!("\nChecking Sony's public update catalog for {title_id}...");
+    progress.render(42, "Update check", "Checking published metadata");
+    let update = match iso2god::forge::ps4_updates::latest_update(title_id) {
+        Ok(Some(update)) => update,
+        Ok(None) => {
+            println!("No update is currently listed for {title_id}.");
+            log.info(&format!(
+                "Sony's public update feed returned no update for {title_id}"
+            ))?;
+            return Ok(None);
+        }
+        Err(error) => {
+            println!("Could not check Sony's public update catalog: {error:#}");
+            log.info(&format!(
+                "Update discovery failed for {title_id}; base-game conversion can continue: {error:#}"
+            ))?;
+            if prompt_yes_no_key("Continue building the base game without an update?", true)?
+                == Some(true)
+            {
+                return Ok(None);
+            }
+            bail!("PS4 package conversion cancelled after update discovery failed")
+        }
+    };
+    let size = update
+        .size_bytes
+        .map(format_bytes)
+        .unwrap_or_else(|| "size not published".to_owned());
+    println!(
+        "Game: {} ({title_id})\nBase version: {}\nLatest available update: v{} ({size})\nContent ID: {}\nThe public feed returns the latest version only.",
+        update.title.as_deref().unwrap_or(&base.title),
+        if base.version.is_empty() {
+            "unknown"
+        } else {
+            &base.version
+        },
+        update.version,
+        update.content_id
+    );
+    if !base.version.is_empty()
+        && compare_ps4_versions(&update.version, &base.version)
+            .is_some_and(|ordering| ordering != std::cmp::Ordering::Greater)
+    {
+        println!(
+            "The listed update is not newer than the base-game version; it will not be downloaded."
+        );
+        log.info(&format!(
+            "Latest PS4 update {} v{} is not newer than base v{}",
+            title_id, update.version, base.version
+        ))?;
+        return Ok(None);
+    }
+    let Some(true) = prompt_yes_no_key(
+        "Download and include this latest update in the PS4 FPKG build?",
+        false,
+    )?
+    else {
+        log.info(&format!(
+            "Latest PS4 update {} v{} was not selected",
+            title_id, update.version
+        ))?;
+        return Ok(None);
+    };
+    ensure!(
+        !cancelled.load(Ordering::Relaxed),
+        "PS4 update download cancelled"
+    );
+    let package = iso2god::forge::ps4_updates::update_package(&update)?;
+    progress.render(44, "Update download", "Downloading official update package");
+    let download_started = Instant::now();
+    let download_cancelled = cancelled.clone();
+    let path = iso2god::forge::ps4_updates::download_update(
+        &update,
+        &package,
+        cache_root,
+        cancelled,
+        |bytes, total| {
+            if poll(Duration::from_millis(1)).unwrap_or(false)
+                && matches!(read(), Ok(Event::Key(key)) if key.kind == KeyEventKind::Press && key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('c'))
+            {
+                download_cancelled.store(true, Ordering::Relaxed);
+            }
+            let percent = total
+                .filter(|total| *total > 0)
+                .map(|total| {
+                    (44 + bytes.saturating_mul(28).checked_div(total).unwrap_or(0)).min(72) as u8
+                })
+                .unwrap_or(44);
+            let seconds = download_started.elapsed().as_secs_f64().max(0.1);
+            let speed = (bytes as f64 / seconds).min(u64::MAX as f64) as u64;
+            let stage = format!("Update {}/s", format_bytes(speed));
+            progress.render(percent, &stage, "Downloading Sony update package");
+        },
+    )?;
+    progress.render(72, "Update check", "Validating downloaded package metadata");
+    let metadata = read_ps4_pkg_metadata(tool, &path)?;
+    ensure_ps4_base_update_compatible(base, &metadata)?;
+    ensure!(
+        metadata.version == update.version,
+        "downloaded update version {} does not match published version {}",
+        metadata.version,
+        update.version
+    );
+    ensure!(
+        metadata.content_id.eq_ignore_ascii_case(&update.content_id),
+        "downloaded update Content ID does not match the catalog entry"
+    );
+    ensure!(
+        metadata.category.eq_ignore_ascii_case("gp")
+            || metadata.package_type.to_ascii_lowercase().contains("patch"),
+        "Sony update download is not identified as PS4 patch content (CATEGORY={} TYPE={})",
+        metadata.category,
+        metadata.package_type
+    );
+    log.info(&format!(
+        "Downloaded and validated Sony update {} v{} ({}) to managed cache",
+        title_id,
+        update.version,
+        path.display()
+    ))?;
+    Ok(Some(path))
+}
+
+fn compare_ps4_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let parse = |version: &str| {
+        version
+            .split('.')
+            .map(str::parse::<u32>)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()
+    };
+    let mut left = parse(left)?;
+    let mut right = parse(right)?;
+    let width = left.len().max(right.len());
+    left.resize(width, 0);
+    right.resize(width, 0);
+    Some(left.cmp(&right))
+}
+
+fn build_ps4_dlc_fpkg(
+    tool: &Path,
+    source: &Path,
+    base: &Ps4PkgMetadata,
+    workspace: &Path,
+    index: usize,
+    cancelled: Arc<AtomicBool>,
+    progress: Arc<Ps4PackageProgress>,
+) -> Result<PathBuf, Error> {
+    ensure!(
+        source.exists(),
+        "selected PS4 add-on source does not exist: {}",
+        source.display()
+    );
+    ensure!(
+        !base.title_id.is_empty(),
+        "the base package has no Title ID to validate selected DLC against"
+    );
+    ensure!(!cancelled.load(Ordering::Relaxed), "conversion cancelled");
+    let label = format!("DLC {}", index + 1);
+    progress.render(74, &label, "Inspecting add-on package");
+    let raw_metadata = if source.is_file()
+        && source
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("pkg"))
+    {
+        Some(read_ps4_pkg_metadata(tool, source)?)
+    } else {
+        None
+    };
+    if let Some(metadata) = &raw_metadata {
+        ensure!(
+            metadata.category.eq_ignore_ascii_case("ac")
+                || metadata.package_type.to_ascii_lowercase().contains("dlc")
+                || metadata.package_type.to_ascii_lowercase().contains("addon"),
+            "{} is not recognized as DLC/add-on content (CATEGORY={} TYPE={})",
+            source.display(),
+            metadata.category,
+            metadata.package_type
+        );
+        if !metadata.title_id.is_empty() {
+            ensure!(
+                metadata.title_id.eq_ignore_ascii_case(&base.title_id),
+                "DLC Title ID {} does not match base game {}",
+                metadata.title_id,
+                base.title_id
+            );
+        }
+        if let Some(dlc_title_id) =
+            iso2god::forge::detector::title_id_from_content_id(&metadata.content_id)
+        {
+            ensure!(
+                dlc_title_id.eq_ignore_ascii_case(&base.title_id),
+                "DLC Content ID {} does not match base game {}",
+                metadata.content_id,
+                base.title_id
+            );
+        }
+    }
+
+    let extraction = workspace.join(format!("dlc_pkg_ext_{index}"));
+    fs::create_dir_all(&extraction)?;
+    let payload = extract_or_resolve_payload_with_progress(
+        source,
+        &extraction,
+        cancelled.clone(),
+        Some(ps4_package_phase(
+            progress.clone(),
+            74,
+            82,
+            "Extracting DLC",
+        )),
+    )?;
+    ensure!(payload.is_dir(), "DLC input did not extract to a folder");
+    let stage = workspace.join(format!("dlc_stage_{index}"));
+    let image0 = payload.join("Image0");
+    let source_root = if image0.is_dir() {
+        image0
+    } else {
+        payload.clone()
+    };
+    copy_dir_recursive_merge(&source_root, &stage)?;
+    let sc0 = payload.join("Sc0");
+    if sc0.is_dir() {
+        let target = stage.join("sce_sys");
+        fs::create_dir_all(&target)?;
+        copy_dir_recursive_merge(&sc0, &target)?;
+    }
+    let sfo = stage.join("sce_sys").join("param.sfo");
+    ensure!(sfo.is_file(), "extracted DLC is missing sce_sys/param.sfo");
+    let category = iso2god::forge::FormatDetector::read_sfo_category(&sfo)
+        .context("DLC param.sfo does not contain a readable CATEGORY")?;
+    ensure!(
+        category.eq_ignore_ascii_case("ac"),
+        "extracted package is not add-on content (CATEGORY={category})"
+    );
+    let title_id = iso2god::forge::FormatDetector::read_sfo_key(&sfo, "TITLE_ID")
+        .context("DLC param.sfo does not contain TITLE_ID")?;
+    ensure!(
+        title_id.eq_ignore_ascii_case(&base.title_id),
+        "DLC Title ID {title_id} does not match base game {}",
+        base.title_id
+    );
+    let content_id = iso2god::forge::FormatDetector::read_sfo_content_id(&sfo)
+        .context("DLC param.sfo does not contain CONTENT_ID")?;
+    ensure!(
+        iso2god::forge::detector::title_id_from_content_id(&content_id)
+            .is_some_and(|id| id.eq_ignore_ascii_case(&base.title_id)),
+        "DLC content ID {content_id} does not identify base title {}",
+        base.title_id
+    );
+    ensure!(
+        walkdir_file_count(&stage) > 1,
+        "DLC extraction contains metadata only and no add-on data files"
+    );
+
+    let safe_content_id = content_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let gp4 = workspace.join(format!("dlc_{index}.gp4"));
+    let output = workspace.join(format!("{}-{safe_content_id}.pkg", base.title_id));
+    progress.render(82, &label, "Generating add-on GP4");
+    let generated = Command::new(tool)
+        .arg("gp4gen")
+        .arg(&stage)
+        .arg("--title-id")
+        .arg(&base.title_id)
+        .arg("--content-id")
+        .arg(&content_id)
+        .arg("--passcode")
+        .arg(PS4_FPKG_PASSCODE)
+        .arg("--out")
+        .arg(&gp4)
+        .output()?;
+    ensure!(
+        generated.status.success() && gp4.is_file(),
+        "DLC GP4 generation failed: {}{}",
+        String::from_utf8_lossy(&generated.stdout),
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let gp4_xml = fs::read_to_string(&gp4)?;
+    ensure!(
+        gp4_xml.contains("<volume_type>pkg_ps4_app</volume_type>"),
+        "generated DLC GP4 has an unexpected volume type"
+    );
+    fs::write(
+        &gp4,
+        gp4_xml.replace(
+            "<volume_type>pkg_ps4_app</volume_type>",
+            "<volume_type>pkg_ps4_ac_data</volume_type>",
+        ),
+    )?;
+    progress.render(86, &label, "Building separate DLC FPKG");
+    let built = Command::new(tool)
+        .arg("build")
+        .arg(&gp4)
+        .arg(&stage)
+        .arg("--passcode")
+        .arg(PS4_FPKG_PASSCODE)
+        .arg("--out")
+        .arg(&output)
+        .arg("--validate")
+        .output()?;
+    ensure!(
+        built.status.success() && output.is_file(),
+        "DLC FPKG build failed: {}{}",
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let validation = Command::new(tool)
+        .arg("validate")
+        .arg("--fake-tolerant")
+        .arg(&output)
+        .output()?;
+    ensure!(
+        validation.status.success(),
+        "DLC FPKG validation failed: {}{}",
+        String::from_utf8_lossy(&validation.stdout),
+        String::from_utf8_lossy(&validation.stderr)
+    );
+    let metadata = read_ps4_pkg_metadata(tool, &output)?;
+    ensure!(
+        metadata.category.eq_ignore_ascii_case("ac"),
+        "built DLC FPKG has CATEGORY={} instead of ac",
+        metadata.category
+    );
+    ensure!(
+        metadata.title_id.eq_ignore_ascii_case(&base.title_id),
+        "built DLC FPKG Title ID mismatch"
+    );
+    ensure!(
+        metadata.content_id.eq_ignore_ascii_case(&content_id),
+        "built DLC FPKG Content ID mismatch"
+    );
+    progress.render(92, &label, "DLC FPKG validated");
+    Ok(output)
 }
 
 fn set_gp4_application_reference(gp4_path: &Path, base_pkg: &Path) -> Result<(), Error> {
@@ -4917,29 +5678,6 @@ fn find_liborbis_pkg_tool() -> Option<PathBuf> {
         }
     }
     iso2god::forge::backends::find_liborbis_pkg_tool()
-}
-
-fn find_orbis_pub_cmd() -> Option<PathBuf> {
-    if let Some(configured) = env::var_os("DIGITAL_FORGE_ORBIS_PUB_CMD") {
-        let path = PathBuf::from(configured);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    if let Ok(executable) = env::current_exe()
-        && let Some(directory) = executable.parent()
-    {
-        let sibling = directory.join("orbis-pub-cmd.exe");
-        if sibling.is_file() {
-            return Some(sibling);
-        }
-    }
-    let in_path = env::var_os("PATH").and_then(|paths| {
-        env::split_paths(&paths)
-            .map(|directory| directory.join("orbis-pub-cmd.exe"))
-            .find(|candidate| candidate.is_file())
-    });
-    in_path.or_else(iso2god::forge::backends::find_orbis_pub_cmd)
 }
 
 fn unique_completed_pkg(parent: &Path) -> PathBuf {
@@ -6765,12 +7503,26 @@ mod manual_import_tests {
     }
 
     #[test]
+    fn ps4_update_version_comparison_uses_numeric_components() {
+        assert_eq!(
+            compare_ps4_versions("01.10", "01.09"),
+            Some(std::cmp::Ordering::Greater)
+        );
+        assert_eq!(
+            compare_ps4_versions("01.02.00", "01.02"),
+            Some(std::cmp::Ordering::Equal)
+        );
+        assert_eq!(compare_ps4_versions("bad", "01.02"), None);
+    }
+
+    #[test]
     fn ps4_merge_preflight_rejects_mismatched_title_ids() {
         let base = Ps4PkgMetadata {
             path: PathBuf::from("base.pkg"),
             title: "LA Noire".to_owned(),
             title_id: "CUSA09172".to_owned(),
             content_id: "UP1018-CUSA09172_00-LANOIRE000000000".to_owned(),
+            version: "01.00".to_owned(),
             category: "gd".to_owned(),
             package_type: "Game".to_owned(),
             passcode_status: String::new(),
@@ -6796,6 +7548,7 @@ mod manual_import_tests {
             title: "LA Noire".to_owned(),
             title_id: "CUSA09172".to_owned(),
             content_id: String::new(),
+            version: "01.00".to_owned(),
             category: "gd".to_owned(),
             package_type: "Game".to_owned(),
             passcode_status: String::new(),
