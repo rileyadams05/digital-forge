@@ -192,7 +192,7 @@ def main():
     if 'id="report-drop-zone"' not in compatibility or 'id="report-log-hint"' not in compatibility:
         errors.append("Compatibility page is missing its accessible game-log drop zone")
     api_source = (ROOT.parent / "site-api" / "src" / "index.mjs").read_text(encoding="utf-8")
-    if 'field(form, "description", "Description"' not in api_source or 'description,' not in api_source:
+    if 'form.get("description")' not in api_source or 'format, description' not in api_source:
         errors.append("Reporting API must accept and publish the report description")
     if 'field(form, "console"' in api_source or 'form.get("environment")' in api_source or 'form.get("digital_forge_version")' in api_source:
         errors.append("Reporting API should not require the removed report fields")
