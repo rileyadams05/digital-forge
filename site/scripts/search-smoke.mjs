@@ -36,7 +36,8 @@ vm.runInNewContext(source, context, { filename: "search.js" });
 
 assert.equal(mode.value, "", "homepage should begin without a selected filter");
 assert.equal(input.disabled, true, "search field should be disabled without a selected filter");
-assert.match(searchHelp.textContent, /choose Guides, Games, or Emulators/i);
+assert.match(searchHelp.textContent, /choose Guides or Games/i);
+assert.doesNotMatch(source, /emulatorLookups|mode.*emulators/i, "homepage search must not include an emulator mode");
 input.value = "CUSA08519";
 listeners.submit({ preventDefault() {} });
 assert.equal(requests.length, 0, "search without a selected filter should not run a query");
@@ -124,45 +125,10 @@ html = await submit("BLUS30443");
 assert.match(html, /Digital Forge community reports/);
 assert.equal(decodeURIComponent(requests.find(url => url.includes("api.github.com"))).match(/repo:rileyadams05\/digital-forge is:issue ([^&]+)/)?.[1], "BLUS30443", "Games search must submit only the entered game ID");
 
-mode.value = "emulators";
-output.innerHTML = "previous Games results";
-output.hidden = false;
-listeners["mode-change"]();
-assert.equal(output.hidden, true, "switching to Emulators should hide the Digital Forge result panel");
-assert.equal(output.innerHTML, "", "switching to Emulators should clear previous Games results");
-input.value = "";
-listeners.submit({ preventDefault() {} });
-assert.equal(output.hidden, true, "an empty Emulators search should leave no result on the Digital Forge page");
-assert.equal(output.innerHTML, "");
-input.value = "PS3 BLUS30443";
-requests.length = 0;
-listeners.submit({ preventDefault() {} });
-assert.equal(output.hidden, true, "emulator lookup should not render local search results");
-assert.equal(output.innerHTML, "", "emulator lookup should leave the Digital Forge result panel empty");
-assert.equal(requests.length, 0, "emulator lookup should not query any compatibility API");
-assert.equal(opened.at(-1)[0], "https://www.rpcs3.net/compatibility?g=BLUS30443");
-assert.equal(opened.at(-1)[1], "_blank");
-assert.equal(opened.at(-1)[2], "noopener,noreferrer");
-assert.match(searchHelp.textContent, /console name or short name/i);
-assert.equal(inputLabel.textContent, "Search console and game ID");
-
-mode.value = "emulators";
-listeners["mode-change"]();
-input.value = "PlayStation 4 CUSA08519";
-listeners.submit({ preventDefault() {} });
-assert.equal(opened.at(-1)[0], "https://github.com/shadps4-compatibility/shadps4-game-compatibility/issues?q=is%3Aissue%20CUSA08519");
-assert.equal(output.innerHTML, "");
-
-const previousTarget = opened.at(-1)[0];
-input.value = "PS5 CUSA08519";
-listeners.submit({ preventDefault() {} });
-assert.equal(opened.at(-1)[0], previousTarget, "consoles without a verified compatibility list should not open an unrelated lookup");
-assert.match(searchHelp.textContent, /No dedicated emulator compatibility list has been verified/);
-
 apiResponse = { ok: false, status: 403, json: async () => ({}) };
 html = await submit("CUSA08519");
 assert.match(issueResults.innerHTML, /Test status: Unknown/);
 assert.match(issueResults.innerHTML, /rate limit or access restriction/);
 assert.equal((issueResults.innerHTML.match(/class="result-card/g) || []).length, 1, "API errors should remain in one status card");
 
-console.log("Search smoke checks passed: Guides-only documentation, Games-only IDs and reports, direct emulator compatibility lookups, and API failure states.");
+console.log("Search smoke checks passed: Guides and Games filters, game status reporting, and API failure states.");

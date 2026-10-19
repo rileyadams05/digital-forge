@@ -95,19 +95,25 @@ def main():
                     errors.append(f"Missing anchor: {relative} -> {link}")
 
     home = (ROOT / "index.html").read_text(encoding="utf-8")
-    required_home_terms = ("Digital Forge", 'id="search-form"', 'id="search-mode"', 'id="site-search"', 'value="guides"', 'value="games"', 'value="emulators"', "What is Digital Forge?", "Submit a successful test", 'href="compatibility.html#success-report"')
+    required_home_terms = ("Digital Forge", 'id="search-form"', 'id="search-mode"', 'id="site-search"', 'value="guides"', 'value="games"', "What is Digital Forge?", "Submit a successful test", 'href="compatibility.html#success-report"')
     for term in required_home_terms:
         if term not in home:
             errors.append(f"Homepage is missing required content: {term}")
+    if '<option value="emulators">' in home or "Emulators" in home:
+        errors.append("Homepage search must contain only Guides and Games filters")
+    if "→" in home or home.count("↗") < 4:
+        errors.append("Homepage action buttons must use the angled arrow consistently")
     if "type=\"submit\"" in home or "Search <span" in home:
         errors.append("Homepage search should submit with Enter and must not show a Search button")
     if 'id="home-button"' not in home or 'class="home-control"' not in home:
         errors.append("Homepage is missing its Home control")
 
     search = (ROOT / "assets/search.js").read_text(encoding="utf-8")
-    for term in ("itemflows", "api.github.com/search/issues", "www.rpcs3.net/compatibility?g=", "shadps4-game-compatibility/issues?q=", 'searchMode === "guides"', 'mode?.value === "emulators"', "REPORT_FORM", "noopener,noreferrer"):
+    for term in ("itemflows", "api.github.com/search/issues", 'searchMode === "guides"', "REPORT_FORM", "noopener,noreferrer"):
         if term not in search:
             errors.append(f"Search integration is missing required behavior marker: {term}")
+    if any(marker in search for marker in ("emulatorLookups", "consolesWithoutVerifiedList", 'mode?.value === "emulators"', "Emulators: enter")):
+        errors.append("Emulator searching must not be a homepage search mode")
     if any(marker in search for marker in ("game-identifiers.json.gz", "titlescreen.org/api/v1/search", "loadGameIndex", "lookupGameIdentity")):
         errors.append("Games search should use GitHub Issues only, without a separate title identifier index")
     success_reports = (ROOT / "assets" / "success-reports.js").read_text(encoding="utf-8") if (ROOT / "assets" / "success-reports.js").exists() else ""
@@ -115,6 +121,11 @@ def main():
         errors.append("Successful test reporting is missing its GitHub sign-in or submission flow")
     if 'id="success-report-form"' not in (ROOT / "compatibility.html").read_text(encoding="utf-8"):
         errors.append("Compatibility page is missing its successful test submission form")
+    compatibility_page = (ROOT / "compatibility.html").read_text(encoding="utf-8")
+    if "Select <strong>Emulators</strong>" in compatibility_page or "Emulators searches" in compatibility_page:
+        errors.append("Compatibility guidance must direct users to emulator project lists, not a site emulator search")
+    if "the emulator project's own compatibility list" not in compatibility_page:
+        errors.append("Compatibility page should direct users to emulator projects' own compatibility sources")
 
     formats_page = (ROOT / "formats.html").read_text(encoding="utf-8")
     if ('src="assets/formats.js?v=12"' not in formats_page

@@ -30,14 +30,7 @@ accepted only when they point to the specific upstream host needed by that resul
   are reported separately from game status. Successful test results are submitted through the
   GitHub sign-in flow on the compatibility page and become public only after a reviewer merges the
   generated pull request. The server-side setup is documented in site-api/README.md.
-- Emulators searches take a console name or short name followed by a game ID, then open that
-  emulator's compatibility source directly. The mapped sources are DuckStation (PS1), PCSX2 (PS2),
-  RPCS3 (PS3), shadPS4 (PS4), Vita3K (PS Vita), Azahar (3DS), xemu (Original Xbox), and Xenia
-  Canary (Xbox 360). RPCS3 and the GitHub report trackers filter by ID; xemu opens the matching
-  title-ID page. List pages without a stable ID query use a browser text fragment as a best-effort
-  location hint. Other catalog consoles report that no dedicated compatibility source has been
-  verified; PS5 is excluded as requested. Searches leave the Digital Forge results area empty and
-  do not use a general-purpose search engine.
+- The compatibility page links directly to emulator projects' own compatibility lists and issue trackers. Digital Forge does not maintain emulator ratings or imply that an emulator result verifies a Digital Forge conversion or original-console behavior.
 - The GitHub failure form opens for the visitor to review and submit; the website never uploads a
   diagnostic log or creates an issue automatically. Successful results are not filed as issues.
 
