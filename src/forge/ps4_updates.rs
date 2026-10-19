@@ -6,6 +6,7 @@
 //! enabled for metadata, manifests, and package downloads.
 
 use anyhow::{Context, Result, bail, ensure};
+use base64::Engine as _;
 use futures::StreamExt;
 use quick_xml::Reader;
 use quick_xml::events::Event;
@@ -25,6 +26,12 @@ const PATCH_URL_KEY: [u8; 32] = [
     0xEC, 0x0E, 0x7E, 0xC3, 0xE9, 0x7E, 0xFD, 0xCA, 0xEF, 0xCD, 0xBA, 0xAF, 0xA6, 0x37, 0x8D, 0x84,
 ];
 const SONY_PATCH_ROOT: &str = "https://gs-sec.ww.np.dl.playstation.net/plo/np";
+const SONY_ROOT_CA_PEM: &[u8] =
+    include_bytes!("../../consoles/PlayStation/FPKG/resources/sony-dnas-root-05.pem");
+const SONY_ROOT_CA_SHA256: [u8; 32] = [
+    0x51, 0xd5, 0xa7, 0x83, 0x3f, 0x67, 0xf1, 0xd1, 0xc6, 0x21, 0x2f, 0x75, 0x99, 0x7e, 0x4b, 0x83,
+    0xda, 0xda, 0x0f, 0x79, 0x10, 0xba, 0x4b, 0x5a, 0x3f, 0xa4, 0xe9, 0xb7, 0xb9, 0xbc, 0x82, 0x7c,
+];
 const MAX_METADATA_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_UPDATE_BYTES: u64 = 200 * 1024 * 1024 * 1024;
 
@@ -68,10 +75,21 @@ pub fn latest_update(title_id: &str) -> Result<Option<LatestUpdate>> {
 /// fields, if supplied by Sony's manifest.
 pub fn update_package(update: &LatestUpdate) -> Result<UpdatePackage> {
     let manifest_url = validate_playstation_url(&update.manifest_url)?;
-    let response = http_client()?
-        .get(manifest_url.as_str())
-        .send()
-        .context("could not retrieve the Sony update package manifest")?;
+    let response = match http_client()?.get(manifest_url.as_str()).send() {
+        Ok(response) => response,
+        Err(error) if is_tls_hostname_mismatch(&error) => {
+            let host = reqwest::Url::parse(&manifest_url)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_owned))
+                .unwrap_or_else(|| "Sony's CDN".to_owned());
+            bail!(
+                "Sony's update CDN host `{host}` returned a TLS certificate that does not identify that hostname; Digital Forge refused the manifest"
+            );
+        }
+        Err(error) => {
+            return Err(error).context("could not retrieve the Sony update package manifest");
+        }
+    };
     let response = checked_response(response, manifest_url.as_str())?;
     let bytes = read_limited(response, MAX_METADATA_BYTES)?;
     let json: Value =
@@ -208,11 +226,22 @@ async fn download_attempt_async(
     cancelled: Arc<AtomicBool>,
     progress: &mut impl FnMut(u64, Option<u64>),
 ) -> Result<()> {
-    let response = download_client()?
-        .get(url)
-        .send()
-        .await
-        .context("could not download the official PS4 update package")?;
+    let url = validate_playstation_url(url)?;
+    let response = match download_client()?.get(&url).send().await {
+        Ok(response) => response,
+        Err(error) if is_tls_hostname_mismatch(&error) => {
+            let host = reqwest::Url::parse(&url)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_owned))
+                .unwrap_or_else(|| "Sony's CDN".to_owned());
+            bail!(
+                "Sony's update CDN host `{host}` returned a TLS certificate that does not identify that hostname; Digital Forge refused the package download"
+            );
+        }
+        Err(error) => {
+            return Err(error).context("could not download the official PS4 update package");
+        }
+    };
     ensure!(
         response.status().is_success(),
         "update request failed with HTTP {} for {url}",
@@ -480,6 +509,22 @@ fn checked_response(response: Response, request_url: &str) -> Result<Response> {
     Ok(response)
 }
 
+fn is_tls_hostname_mismatch(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        let message = error.to_string().to_ascii_lowercase();
+        if message.contains("certificate")
+            && (message.contains("name does not match")
+                || message.contains("hostname mismatch")
+                || message.contains("does not identify"))
+        {
+            return true;
+        }
+        cause = error.source();
+    }
+    false
+}
+
 fn read_limited(response: Response, limit: u64) -> Result<Vec<u8>> {
     if let Some(length) = response.content_length() {
         ensure!(length <= limit, "update metadata exceeds the size limit");
@@ -496,8 +541,42 @@ fn read_limited(response: Response, limit: u64) -> Result<Vec<u8>> {
     Ok(data)
 }
 
+fn sony_root_certificate() -> Result<reqwest::Certificate> {
+    let pem =
+        std::str::from_utf8(SONY_ROOT_CA_PEM).context("Sony root CA asset is not UTF-8 PEM")?;
+    let encoded: String = pem
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .map(str::trim)
+        .collect();
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .context("Sony root CA asset is not valid PEM")?;
+    ensure!(
+        Sha256::digest(&der).as_slice() == SONY_ROOT_CA_SHA256,
+        "Sony update trust anchor does not match the pinned SCEI DNAS Root 05 fingerprint"
+    );
+    reqwest::Certificate::from_der(&der).context("could not load pinned Sony update root CA")
+}
+
+fn sony_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let url = attempt.url();
+        let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        if url.scheme() == "https"
+            && (host == "playstation.net" || host.ends_with(".playstation.net"))
+        {
+            attempt.follow()
+        } else {
+            attempt.error("Sony update redirect left the verified HTTPS PlayStation domain")
+        }
+    })
+}
+
 fn http_client() -> Result<Client> {
     Client::builder()
+        .add_root_certificate(sony_root_certificate()?)
+        .redirect(sony_redirect_policy())
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(90))
         .user_agent(concat!("DigitalForge/", env!("CARGO_PKG_VERSION")))
@@ -507,6 +586,8 @@ fn http_client() -> Result<Client> {
 
 fn download_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
+        .add_root_certificate(sony_root_certificate()?)
+        .redirect(sony_redirect_policy())
         .connect_timeout(Duration::from_secs(15))
         // A per-chunk idle timeout below allows very large packages to take
         // longer than a fixed total duration while still retrying stalled IO.
@@ -521,6 +602,40 @@ mod tests {
     use super::*;
 
     const XML: &[u8] = br#"<?xml version="1.0"?><titlepatch titleid="CUSA00001"><tag><package version="01.07" content_id="IP9100-CUSA00001_00-PLAYROOM00000000" size="123456" manifest_url="https://gs2.ww.prod.dl.playstation.net/update.json"><paramsfo><title>THE PLAYROOM</title></paramsfo></package></tag></titlepatch>"#;
+
+    #[test]
+    fn sony_root_ca_is_valid_pem_with_the_pinned_fingerprint() {
+        assert!(sony_root_certificate().is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires a live, TLS-validated connection to Sony's update feed"]
+    fn live_sony_update_feed_lookup() {
+        let update = latest_update("CUSA00552").expect("live Sony feed request must succeed");
+        let update = update.expect("Sony should publish an update for the fixture title");
+        eprintln!(
+            "Sony update catalog: {} — {} ({:?} bytes)",
+            update.title_id, update.version, update.size_bytes
+        );
+        match update_package(&update) {
+            Ok(package) => eprintln!(
+                "Sony package manifest accepted; package size {:?} bytes",
+                package.size_bytes
+            ),
+            Err(error) => eprintln!("Sony package manifest unavailable: {error:#}"),
+        }
+        assert_eq!(update.title_id, "CUSA00552");
+        assert!(!update.version.is_empty());
+    }
+
+    #[test]
+    fn cdn_hostname_mismatch_is_detected_without_relaxing_tls() {
+        let error =
+            std::io::Error::other("The certificate's CN name does not match the passed value.");
+        assert!(is_tls_hostname_mismatch(&error));
+        let error = std::io::Error::other("connection reset");
+        assert!(!is_tls_hostname_mismatch(&error));
+    }
 
     #[test]
     fn title_id_normalization_and_validation() {
