@@ -36,7 +36,7 @@
   if (dropZone && logField) {
     const acceptDroppedFile = file => {
       if (!file) return;
-      if (file.size > 5 * 1024 * 1024 || !/\\.(log|txt)$/i.test(file.name)) {
+      if (file.size > 5 * 1024 * 1024 || !/\.(log|txt)$/i.test(file.name)) {
         setStatus("Choose a .log or .txt file up to 5 MB.", true);
         return;
       }
