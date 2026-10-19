@@ -119,6 +119,9 @@ def main():
     for term in ("itemflows", "api.github.com/search/issues", 'searchMode === "guides"', "REPORT_FORM", 'rel="noopener noreferrer"'):
         if term not in search:
             errors.append(f"Search integration is missing required behavior marker: {term}")
+    for guide_route in ("guides/itemzflow.html", "guides/fpkg.html", "guides/iso2god.html", "compatibility.html"):
+        if f'url: "{guide_route}"' not in search:
+            errors.append(f"Guide search is missing its route: {guide_route}")
     if any(marker in search for marker in ("emulatorLookups", "consolesWithoutVerifiedList", 'mode?.value === "emulators"', "Emulators: enter")):
         errors.append("Emulator searching must not be a homepage search mode")
     if 'title: "PKG guide"' in search or "guides/pkg.html" in search:
