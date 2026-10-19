@@ -109,7 +109,7 @@ def main():
         errors.append("Homepage is missing its Home control")
 
     search = (ROOT / "assets/search.js").read_text(encoding="utf-8")
-    for term in ("itemflows", "api.github.com/search/issues", 'searchMode === "guides"', "REPORT_FORM", "noopener,noreferrer"):
+    for term in ("itemflows", "api.github.com/search/issues", 'searchMode === "guides"', "REPORT_FORM", 'rel="noopener noreferrer"'):
         if term not in search:
             errors.append(f"Search integration is missing required behavior marker: {term}")
     if any(marker in search for marker in ("emulatorLookups", "consolesWithoutVerifiedList", 'mode?.value === "emulators"', "Emulators: enter")):
