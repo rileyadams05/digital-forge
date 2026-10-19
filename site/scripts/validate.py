@@ -95,7 +95,7 @@ def main():
                     errors.append(f"Missing anchor: {relative} -> {link}")
 
     home = (ROOT / "index.html").read_text(encoding="utf-8")
-    required_home_terms = ("Digital Forge", 'id="search-form"', 'id="search-mode"', 'id="site-search"', 'value="guides"', 'value="games"', 'value="emulators"', "What is Digital Forge?")
+    required_home_terms = ("Digital Forge", 'id="search-form"', 'id="search-mode"', 'id="site-search"', 'value="guides"', 'value="games"', 'value="emulators"', "What is Digital Forge?", "Submit a successful test", 'href="compatibility.html#success-report"')
     for term in required_home_terms:
         if term not in home:
             errors.append(f"Homepage is missing required content: {term}")
