@@ -66,6 +66,23 @@ async function gh(url, token, init = {}) {
   if (!response.ok) throw new Error("GitHub request failed: " + (data?.message || response.status));
   return data;
 }
+async function oauthPayload(response) {
+  const raw = await response.text();
+  try { return raw ? JSON.parse(raw) : null; } catch {}
+  // GitHub normally returns JSON when requested, but OAuth error responses can
+  // also be form-encoded. Do not parse or expose arbitrary HTML/plain-text
+  // bodies as if they were a token response.
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/x-www-form-urlencoded")) {
+    return Object.fromEntries(new URLSearchParams(raw));
+  }
+  return null;
+}
+async function githubProfile(response) {
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) return null;
+  try { return await response.json(); } catch { return null; }
+}
 async function appJwt(env) {
   const pem = env.GITHUB_APP_PRIVATE_KEY.replace(/\\n/g, "\n");
   const keyBytes = Uint8Array.from(atob(pem.replace(/-----BEGIN RSA PRIVATE KEY-----|-----END RSA PRIVATE KEY-----|\s/g, "")), c => c.charCodeAt(0));
@@ -111,19 +128,23 @@ async function authCallback(env, request) {
   if (url.searchParams.has("error")) return new Response(null, { status: 302, headers: {
     Location: siteBase(env) + "/compatibility.html?login=cancelled", "Set-Cookie": clearState, "cache-control": "no-store", "referrer-policy": "no-referrer"
   } });
-  const state = await verify(env, url.searchParams.get("state")), code = url.searchParams.get("code");
-  if (!state || !code || decodeURIComponent(cookieState) !== url.searchParams.get("state")) return new Response("GitHub sign-in could not be verified. Please try again.", { status: 400, headers: { "Set-Cookie": clearState, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+  const stateToken = url.searchParams.get("state");
+  let state = null, cookieValue = "";
+  try { state = await verify(env, stateToken); } catch {}
+  try { cookieValue = decodeURIComponent(cookieState); } catch {}
+  const code = url.searchParams.get("code");
+  if (!state || !code || cookieValue !== stateToken) return new Response("GitHub sign-in could not be verified. Please try again.", { status: 400, headers: { "Set-Cookie": clearState, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
   const response = await fetch("https://github.com/login/oauth/access_token", {
     method: "POST", headers: { Accept: "application/json", "content-type": "application/json" },
     body: JSON.stringify({ client_id: env.GITHUB_APP_CLIENT_ID, client_secret: env.GITHUB_APP_CLIENT_SECRET, code,
       redirect_uri: env.GITHUB_APP_CALLBACK_URL || (apiBase(request) + "/auth/callback") })
   });
-  const grant = await response.json();
-  if (!response.ok || grant.error || !grant.access_token) return new Response("GitHub sign-in failed. Please try again.", { status: 401, headers: { "Set-Cookie": clearState, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+  const grant = await oauthPayload(response);
+  if (!response.ok || grant?.error || !grant?.access_token) return new Response("GitHub sign-in failed. Please try again.", { status: 401, headers: { "Set-Cookie": clearState, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
   const profileResponse = await fetch("https://api.github.com/user", { headers: {
     Accept: "application/vnd.github+json", Authorization: "Bearer " + grant.access_token, "X-GitHub-Api-Version": "2022-11-28"
   } });
-  const profile = await profileResponse.json();
+  const profile = await githubProfile(profileResponse);
   if (!profileResponse.ok || !profile.id || !profile.login) return new Response("GitHub could not verify this account.", { status: 401, headers: { "Set-Cookie": clearState, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
   const session = await sign(env, { sub: profile.id, login: profile.login, exp: Math.floor(Date.now() / 1000) + 2700 });
   const dest = new URL(state.return_to, siteBase(env)); dest.hash = new URLSearchParams({ github_session: session }).toString();
