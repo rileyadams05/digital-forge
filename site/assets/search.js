@@ -14,7 +14,6 @@ const GAME_RESULTS_URL = GAME_RESULTS_BASE + "/game-results.json";
 const guides = [
   { title: "Itemzflow guide", url: "guides/itemzflow.html", platforms: ["ps4"], formats: ["itemzflow", "itemflow", "itemflows", "item flows"], keys: ["dump all", "gp4", "param.sfo"], summary: "Prepare and import an Itemzflow base-game and update dump folder for the existing PS4 single-package workflow." },
   { title: "FPKG guide", url: "guides/fpkg.html", platforms: ["ps4"], formats: ["fpkg", "fake pkg", "fakepkg", "fake package"], keys: [], summary: "PS4 Fake PKG inputs, configured packaging tools, validation, merge path and limitations." },
-  { title: "PKG guide", url: "guides/pkg.html", platforms: ["ps3", "ps4"], formats: ["pkg", ".pkg", "package"], keys: ["retail pkg", "ps3 pkg", "ps4 pkg"], summary: "PlayStation package formats and platform-specific processing limits." },
   { title: "ISO2GOD guide", url: "guides/iso2god.html", platforms: ["xbox360"], formats: ["iso2god", "god", "games on demand"], keys: ["xbox 360 iso", "xbox360"], summary: "Xbox 360 ISO and Games on Demand workflow, inputs, storage and troubleshooting." },
   { title: "Troubleshooting and compatibility reports", url: "compatibility.html", platforms: [], formats: [], keys: ["troubleshooting", "diagnostic", "log", "issue", "github", "report", "failure", "error", "compatibility"], summary: "Check game status and submit a report with a description and reviewed diagnostic log." }
 ];
@@ -58,11 +57,11 @@ function updateSearchMode() {
   const guideMode = selectedMode === "guides";
   if (input) input.disabled = !selectedMode;
   if (inputLabel) inputLabel.textContent = guideMode ? "Search Digital Forge guides" : selectedMode === "games" ? "Search game ID" : "Search";
-  if (input) input.placeholder = guideMode ? "Console short name + format, e.g. PS4 FPKG…" : selectedMode === "games" ? "Enter a game ID…" : "Choose a filter to start…";
+  if (input) input.placeholder = guideMode ? "Console or conversion type, e.g. PS4 or FPKG…" : selectedMode === "games" ? "Enter a game ID…" : "Choose a filter to start…";
   if (searchHelp) searchHelp.textContent = !selectedMode
     ? "Choose Guides or Games to begin."
     : guideMode
-      ? "Guides: enter the console short name followed by the format, such as PS4 FPKG or Xbox 360 ISO2GOD."
+      ? "Guides: enter a console name or conversion type, such as PS4, FPKG or Xbox 360 ISO2GOD."
       : "Games searches approved test results and GitHub failure reports by game ID.";
   if (searchHelp) searchHelp.textContent += " Press Enter to search.";
 }
@@ -100,8 +99,9 @@ function searchGuides(query) {
   const matching = guides.filter(guide => {
     const matchedFormat = guide.formats.some(format => matchesPhrase(query, format));
     const matchedTopic = guide.keys.some(key => matchesPhrase(query, key));
-    if (!matchedFormat && !matchedTopic) return false;
-    return !detectedConsoles.length || !guide.platforms.length || detectedConsoles.some(consoleId => guide.platforms.includes(consoleId));
+    const matchedConsole = detectedConsoles.some(consoleId => guide.platforms.includes(consoleId));
+    if (!matchedFormat && !matchedTopic && !matchedConsole) return false;
+    return !detectedConsoles.length || !guide.platforms.length || matchedConsole;
   });
   return { detectedConsoles, matching };
 }
@@ -117,7 +117,7 @@ function run(rawQuery, searchMode = mode?.value || "games") {
     for (const guide of matchingGuides) guideHtml += card("Digital Forge guide", guide.title, guide.summary, guide.url, "Open guide");
     if (!matchingGuides.length) {
       const prompt = detectedConsoles.length
-        ? "Add the format or workflow you used after the console name, for example PS4 PKG or Xbox 360 ISO2GOD."
+        ? "Add a conversion type after the console name, for example PS4 FPKG or Xbox 360 ISO2GOD."
         : "Enter the console short name followed by a format or workflow, for example PS4 FPKG, PS4 Itemzflow or Xbox 360 ISO2GOD.";
       guideHtml += '<p class="callout">No guide matched “' + esc(query) + '”. ' + esc(prompt) + '</p>';
     }
