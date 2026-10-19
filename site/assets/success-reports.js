@@ -24,6 +24,47 @@
     status.textContent = message;
     status.classList.toggle("error-message", error);
   };
+  const logField = form.elements.game_log;
+  const dropZone = document.querySelector("#report-drop-zone");
+  const logName = document.querySelector("#report-log-name");
+  const syncLogName = () => {
+    const file = logField?.files?.[0];
+    if (!logName) return;
+    logName.textContent = file ? file.name : "";
+    logName.hidden = !file;
+  };
+  if (dropZone && logField) {
+    const acceptDroppedFile = file => {
+      if (!file) return;
+      if (file.size > 5 * 1024 * 1024 || !/\\.(log|txt)$/i.test(file.name)) {
+        setStatus("Choose a .log or .txt file up to 5 MB.", true);
+        return;
+      }
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      logField.files = transfer.files;
+      syncLogName();
+      setStatus("");
+    };
+    dropZone.addEventListener("click", () => logField.click());
+    dropZone.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        logField.click();
+      }
+    });
+    dropZone.addEventListener("dragover", event => {
+      event.preventDefault();
+      dropZone.classList.add("is-dragging");
+    });
+    dropZone.addEventListener("dragleave", () => dropZone.classList.remove("is-dragging"));
+    dropZone.addEventListener("drop", event => {
+      event.preventDefault();
+      dropZone.classList.remove("is-dragging");
+      acceptDroppedFile(event.dataTransfer?.files?.[0]);
+    });
+    logField.addEventListener("change", syncLogName);
+  }
   const setSignedIn = login => {
     account.hidden = !login;
     account.textContent = login ? "Signed in as @" + login : "";
@@ -82,6 +123,7 @@
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "The report could not be prepared.");
       form.reset();
+      syncLogName();
       if (idField && query.has("game")) idField.value = query.get("game").slice(0, 32);
       setStatus("Your report is ready for review. Open the pull request to see its status.");
       const link = document.createElement("a");
