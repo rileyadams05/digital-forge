@@ -21,6 +21,7 @@
     <h2>Successful tests</h2>
     <p>Successful results appear in the public catalog only after a project reviewer approves and merges the report. Do not submit successful tests as GitHub Issues.</p>
 
+    <div class="report-layout">
     <section id="success-report" aria-labelledby="success-report-title">
       <h2 id="success-report-title">Report a successful test</h2>
       <p>Sign in with GitHub, enter the game details, and attach the Digital Forge game log. The website prepares a pull request in the project repository. Your report is published only after a project reviewer merges it.</p>
@@ -43,16 +44,24 @@
         <label for="report-environment">Test environment</label>
         <input id="report-environment" name="environment" maxlength="100" placeholder="Console model and system software (optional)">
         <label for="report-log">Digital Forge game log</label>
-        <input id="report-log" name="game_log" type="file" accept=".log,.txt,text/plain" required>
-        <p class="form-note">Attach a successful run's Digital Forge game log (up to 5 MB). The log becomes public as part of the pull request.</p>
+        <div id="report-drop-zone" class="log-drop-zone" role="button" tabindex="0" aria-describedby="report-log-hint">
+          <strong>Choose or drop your game log</strong>
+          <span>.log or .txt · Up to 5 MB</span>
+          <span id="report-log-name" class="log-drop-name" aria-live="polite" hidden></span>
+        </div>
+        <input id="report-log" class="sr-only" name="game_log" type="file" accept=".log,.txt,text/plain" required aria-describedby="report-log-hint">
+        <p id="report-log-hint" class="form-note">Review the log for personal information before sharing it. It will be public in the review request.</p>
         <button class="button" type="submit">Prepare review request</button>
       </form>
       <p id="success-report-status" class="form-note" role="status" aria-live="polite"></p>
     </section>
-
-    <h2>Report a game failure</h2>
-    <p>Use the GitHub issue form only if you tested the game and it failed to launch, crashed, or had a reproducible in-game problem. Include the game ID, versions, test environment and a concise description. Attach the shareable Digital Forge game log if it helps explain the failure; review it for personal information first, and do not attach game files.</p>
-    <p><a class="button secondary" href="https://github.com/rileyadams05/digital-forge/issues/new?template=compatibility-report.yml" target="_blank" rel="noopener noreferrer">Report a game failure ↗</a></p>
+    <aside class="failure-report-card" aria-labelledby="failure-report-title">
+      <p class="tag">GITHUB ISSUES</p>
+      <h2 id="failure-report-title">Game not working?</h2>
+      <p>Use the issue form for games you tested that failed to launch, crashed, or had a reproducible in-game problem. Include the game ID and test details. Review any log for personal information first; do not attach game files.</p>
+      <a class="button secondary failure-report-button" href="https://github.com/rileyadams05/digital-forge/issues/new?template=compatibility-report.yml" target="_blank" rel="noopener noreferrer">Report a game failure <span aria-hidden="true">↗</span></a>
+    </aside>
+    </div>
 
     <ul>
       <li><strong>Unknown:</strong> no approved successful test or matching failure report is recorded.</li>
