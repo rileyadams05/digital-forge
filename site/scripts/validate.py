@@ -134,6 +134,8 @@ def main():
         errors.append("Compatibility page contains removed success copy, emulator links or old report fields")
     if '<textarea id="report-description" name="description" required' not in compatibility_page:
         errors.append("Successful test form must collect a description")
+    if 'id="report-format"' not in compatibility_page or 'placeholder="FPKG, Itemzflow…"' not in compatibility_page:
+        errors.append("Successful test format examples should list outputs, not the accepted PKG input")
     if "Version and test environment may affect results" in compatibility_page:
         errors.append("Compatibility status copy should not mention removed version and environment fields")
 
