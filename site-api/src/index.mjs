@@ -58,7 +58,7 @@ async function verify(env, token) {
 }
 async function gh(url, token, init = {}) {
   const response = await fetch(url, { ...init, headers: {
-    Accept: "application/vnd.github+json", Authorization: "Bearer " + token, "X-GitHub-Api-Version": "2022-11-28",
+    Accept: "application/vnd.github+json", Authorization: "Bearer " + token, "User-Agent": "Digital-Forge", "X-GitHub-Api-Version": "2022-11-28",
     "content-type": "application/json", ...(init.headers || {})
   } });
   const raw = await response.text(); let data = null;
@@ -142,13 +142,13 @@ async function authCallback(env, request) {
   });
   const response = await fetch("https://github.com/login/oauth/access_token", {
     method: "POST",
-    headers: { Accept: "application/vnd.github+json", "content-type": "application/x-www-form-urlencoded" },
+    headers: { Accept: "application/vnd.github+json", "content-type": "application/x-www-form-urlencoded", "User-Agent": "Digital-Forge" },
     body: tokenRequest.toString()
   });
   const grant = await oauthPayload(response);
   if (!response.ok || grant?.error || !grant?.access_token) return new Response("GitHub sign-in failed. Please try again.", { status: 401, headers: { "Set-Cookie": clearState, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
   const profileResponse = await fetch("https://api.github.com/user", { headers: {
-    Accept: "application/vnd.github+json", Authorization: "Bearer " + grant.access_token, "X-GitHub-Api-Version": "2022-11-28"
+    Accept: "application/vnd.github+json", Authorization: "Bearer " + grant.access_token, "User-Agent": "Digital-Forge", "X-GitHub-Api-Version": "2022-11-28"
   } });
   const profile = await githubProfile(profileResponse);
   if (!profileResponse.ok) return new Response("GitHub profile verification failed (HTTP " + profileResponse.status + "). Please try again.", { status: 401, headers: { "Set-Cookie": clearState, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
@@ -166,7 +166,7 @@ async function appSession(env, request) {
   const accessToken = String(body.access_token || "");
   if (!accessToken.startsWith("ghu_") || accessToken.length > 1024) return json({ error: "Use a GitHub App device-flow token to sign in." }, 401);
   const response = await fetch("https://api.github.com/user", { headers: {
-    Accept: "application/vnd.github+json", Authorization: "Bearer " + accessToken, "X-GitHub-Api-Version": "2022-11-28"
+    Accept: "application/vnd.github+json", Authorization: "Bearer " + accessToken, "User-Agent": "Digital-Forge", "X-GitHub-Api-Version": "2022-11-28"
   } });
   const profile = await response.json();
   if (!response.ok || !profile.id || !profile.login) return json({ error: "GitHub could not verify this account." }, 401);
