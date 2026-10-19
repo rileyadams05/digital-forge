@@ -58,7 +58,7 @@ test("form-encoded OAuth errors are handled without parsing exceptions", async (
   assert.equal(await response.text(), "GitHub sign-in failed. Please try again.");
 });
 
-test("GitHub vendor JSON profile response completes the callback and creates a session", async () => {
+test("Versioned GitHub JSON profile response completes the callback and creates a session", async () => {
   const { state, cookie } = await startLogin();
   globalThis.fetch = async (url, init) => {
     if (String(url) === "https://github.com/login/oauth/access_token") {
@@ -73,7 +73,7 @@ test("GitHub vendor JSON profile response completes the callback and creates a s
     }
     if (String(url) === "https://api.github.com/user") {
       return new Response(JSON.stringify({ id: 123, login: "test-user" }), {
-        headers: { "content-type": "application/vnd.github+json; charset=utf-8" },
+        headers: { "content-type": "application/vnd.github.v3+json; charset=utf-8" },
       });
     }
     throw new Error("Unexpected test request destination");
