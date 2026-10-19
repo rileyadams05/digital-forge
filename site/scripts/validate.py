@@ -168,6 +168,10 @@ def main():
         errors.append("Successful game results should not use a separate website upload form")
     if "GitHub Issues are reserved for games that were tested and failed" not in compatibility:
         errors.append("Compatibility page should clearly reserve Issues for tested game failures")
+    if 'class="report-layout"' not in compatibility or 'class="failure-report-card"' not in compatibility:
+        errors.append("Compatibility page is missing its report and failure layout")
+    if 'id="report-drop-zone"' not in compatibility or 'id="report-log-hint"' not in compatibility:
+        errors.append("Compatibility page is missing its accessible game-log drop zone")
 
     issue_template_path = ROOT.parent / ".github" / "ISSUE_TEMPLATE" / "compatibility-report.yml"
     if issue_template_path.exists():
