@@ -69,7 +69,11 @@ async function submit(query, searchMode = "games") {
 let html = "";
 assert.match(await submit("PS4 Itemflow", "guides"), /Itemzflow guide/);
 assert.match(await submit("PS4 FPKG", "guides"), /FPKG guide/);
-assert.match(await submit("PS3 .PKG", "guides"), /PKG guide/);
+assert.match(await submit("PS3 .PKG", "guides"), /No guide matched/);
+assert.doesNotMatch(await submit("PS3 .PKG", "guides"), /PKG guide/);
+assert.match(await submit("PS4", "guides"), /Itemzflow guide/);
+assert.match(await submit("PS4", "guides"), /FPKG guide/);
+assert.match(await submit("FPKG", "guides"), /FPKG guide/);
 assert.match(await submit("Xbox 360 ISO2GOD", "guides"), /ISO2GOD guide/);
 assert.match(await submit("PS3 FPKG", "guides"), /No guide matched/);
 
