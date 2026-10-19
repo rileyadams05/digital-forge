@@ -187,8 +187,18 @@ def main():
     compatibility = (ROOT / "compatibility.html").read_text(encoding="utf-8")
     if 'id="game-result-form"' in compatibility or 'game-report.js' in compatibility:
         errors.append("Successful game results should not use a separate website upload form")
-    if "GitHub Issues are reserved for games that were tested and failed" not in compatibility:
-        errors.append("Compatibility page should clearly reserve Issues for tested game failures")
+    removed_compatibility_copy = (
+        "Game results come from approved test records.",
+        "<h2>Search a game</h2>",
+        "Choose <strong>Games</strong> on the home page",
+        "<strong>Unknown:</strong>",
+        "<strong>Tested working:</strong>",
+        "<strong>Problem reported:</strong>",
+    )
+    if any(marker in compatibility for marker in removed_compatibility_copy):
+        errors.append("Compatibility page contains the removed search or status-explanation copy")
+    if '<button class="home-control" type="submit">Send to GitHub</button>' not in compatibility:
+        errors.append("Successful test form should use the Home control style and Send to GitHub label")
     if 'class="report-layout"' not in compatibility or 'class="failure-report-card"' not in compatibility:
         errors.append("Compatibility page is missing its report and failure layout")
     if 'id="report-drop-zone"' not in compatibility or 'id="report-log-hint"' not in compatibility:
