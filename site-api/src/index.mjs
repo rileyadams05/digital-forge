@@ -79,8 +79,8 @@ async function oauthPayload(response) {
   return null;
 }
 async function githubProfile(response) {
-  const contentType = response.headers.get("content-type") || "";
-  if (!/^application\/(?:json|vnd\.github\+json)(?:\s*;|$)/i.test(contentType)) return null;
+  // GitHub may use any registered JSON media type for this endpoint. Parse
+  // the response body directly and validate the identity fields below.
   try { return await response.json(); } catch { return null; }
 }
 async function appJwt(env) {
@@ -151,7 +151,8 @@ async function authCallback(env, request) {
     Accept: "application/vnd.github+json", Authorization: "Bearer " + grant.access_token, "X-GitHub-Api-Version": "2022-11-28"
   } });
   const profile = await githubProfile(profileResponse);
-  if (!profileResponse.ok || !profile.id || !profile.login) return new Response("GitHub could not verify this account.", { status: 401, headers: { "Set-Cookie": clearState, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+  if (!profileResponse.ok) return new Response("GitHub profile verification failed (HTTP " + profileResponse.status + "). Please try again.", { status: 401, headers: { "Set-Cookie": clearState, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+  if (!profile?.id || !profile?.login) return new Response("GitHub returned an unreadable profile response. Please try again.", { status: 401, headers: { "Set-Cookie": clearState, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
   const session = await sign(env, { sub: profile.id, login: profile.login, exp: Math.floor(Date.now() / 1000) + 2700 });
   const dest = new URL(state.return_to, siteBase(env)); dest.hash = new URLSearchParams({ github_session: session }).toString();
   return new Response(null, { status: 302, headers: { Location: dest.href, "Set-Cookie": clearState, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
