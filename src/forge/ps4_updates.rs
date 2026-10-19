@@ -11,11 +11,12 @@ use futures::StreamExt;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use reqwest::blocking::{Client, Response};
-use reqwest::header::CONTENT_LENGTH;
+use reqwest::header::{CONTENT_RANGE, RANGE};
 use serde_json::Value;
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,15 +43,30 @@ pub struct LatestUpdate {
     pub version: String,
     pub content_id: String,
     pub size_bytes: Option<u64>,
+    /// The digest embedded in the Sony PKG header, authenticated by the TLS
+    /// title-update XML. It is not a SHA-256 hash of the entire PKG file.
+    pub package_digest: Option<String>,
     pub manifest_url: String,
     pub metadata_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdatePiece {
+    pub url: String,
+    pub file_offset: u64,
+    pub size_bytes: u64,
+    pub sha1: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdatePackage {
     pub url: String,
     pub size_bytes: Option<u64>,
+    pub package_digest: Option<String>,
     pub sha256: Option<String>,
+    pub title_id: String,
+    pub content_id: String,
+    pub pieces: Vec<UpdatePiece>,
 }
 
 /// Query Sony's published metadata for the latest update of a PS4 Title ID.
@@ -59,10 +75,13 @@ pub fn latest_update(title_id: &str) -> Result<Option<LatestUpdate>> {
     let title_id = normalize_title_id(title_id)?;
     let metadata_url = update_metadata_url(&title_id);
     let client = http_client()?;
-    let response = client
-        .get(&metadata_url)
-        .send()
-        .with_context(|| format!("could not query the PS4 update catalog for {title_id}"))?;
+    let response = client.get(&metadata_url).send().map_err(|error| {
+        network_error(
+            error,
+            "could not query the PS4 update catalog",
+            &metadata_url,
+        )
+    })?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
@@ -74,55 +93,139 @@ pub fn latest_update(title_id: &str) -> Result<Option<LatestUpdate>> {
 /// Fetch the update manifest and return its official package URL and integrity
 /// fields, if supplied by Sony's manifest.
 pub fn update_package(update: &LatestUpdate) -> Result<UpdatePackage> {
-    let manifest_url = validate_playstation_url(&update.manifest_url)?;
-    let response = match http_client()?.get(manifest_url.as_str()).send() {
-        Ok(response) => response,
-        Err(error) if is_tls_hostname_mismatch(&error) => {
-            let host = reqwest::Url::parse(&manifest_url)
-                .ok()
-                .and_then(|url| url.host_str().map(str::to_owned))
-                .unwrap_or_else(|| "Sony's CDN".to_owned());
-            bail!(
-                "Sony's update CDN host `{host}` returned a TLS certificate that does not identify that hostname; Digital Forge refused the manifest"
-            );
-        }
-        Err(error) => {
-            return Err(error).context("could not retrieve the Sony update package manifest");
-        }
-    };
-    let response = checked_response(response, manifest_url.as_str())?;
+    let manifest_url = validate_sony_update_url(&update.manifest_url)?;
+    let response = update_transfer_client()?
+        .get(manifest_url.as_str())
+        .send()
+        .map_err(|error| {
+            network_error(
+                error,
+                "could not retrieve Sony's advertised PS4 package manifest",
+                manifest_url.as_str(),
+            )
+        })?;
+    let response = checked_update_response(response, &manifest_url)?;
     let bytes = read_limited(response, MAX_METADATA_BYTES)?;
+    parse_update_manifest(update, &manifest_url, &bytes)
+}
+
+fn parse_update_manifest(
+    update: &LatestUpdate,
+    manifest_url: &reqwest::Url,
+    bytes: &[u8],
+) -> Result<UpdatePackage> {
     let json: Value =
-        serde_json::from_slice(&bytes).context("Sony update manifest is not valid JSON")?;
-    let piece = json
-        .get("pieces")
-        .and_then(Value::as_array)
-        .and_then(|pieces| pieces.first())
-        .context("Sony update manifest contains no package piece")?;
-    let raw_url = piece
-        .get("url")
+        serde_json::from_slice(bytes).context("Sony update manifest is not valid JSON")?;
+    let manifest_digest = json
+        .get("packageDigest")
         .and_then(Value::as_str)
-        .context("Sony update manifest package piece has no URL")?;
-    let url = validate_playstation_url(raw_url)?;
-    let size_bytes = piece
-        .get("size")
+        .map(|digest| digest.trim().to_ascii_uppercase())
+        .filter(|digest| is_hex_digest(digest, 64))
+        .context("Sony update manifest has no valid packageDigest")?;
+    let trusted_digest = update.package_digest.as_deref().context(
+        "Sony's TLS catalog did not provide a package digest; refusing an HTTP manifest",
+    )?;
+    ensure!(
+        manifest_digest.eq_ignore_ascii_case(trusted_digest),
+        "Sony update manifest packageDigest does not match the TLS-authenticated title catalog"
+    );
+    let manifest_size = json
+        .get("originalFileSize")
         .and_then(Value::as_u64)
-        .or(update.size_bytes);
-    let sha256 = ["sha256", "digest", "hash"]
-        .iter()
-        .find_map(|key| piece.get(*key).and_then(Value::as_str))
-        .map(|hash| hash.trim().to_ascii_lowercase())
-        .filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    if let Some(size) = size_bytes {
+        .context("Sony update manifest has no valid originalFileSize")?;
+    if let Some(catalog_size) = update.size_bytes {
         ensure!(
-            size > 0 && size <= MAX_UPDATE_BYTES,
-            "update size is outside supported limits"
+            manifest_size == catalog_size,
+            "Sony update manifest size does not match the TLS-authenticated title catalog"
         );
     }
+    ensure!(
+        manifest_size > 0 && manifest_size <= MAX_UPDATE_BYTES,
+        "update size is outside supported limits"
+    );
+    let manifest_host = manifest_url.host_str().unwrap_or_default();
+    let raw_pieces = json
+        .get("pieces")
+        .and_then(Value::as_array)
+        .context("Sony update manifest contains no package pieces")?;
+    ensure!(
+        !raw_pieces.is_empty(),
+        "Sony update manifest contains no package pieces"
+    );
+    let declared_piece_count = json
+        .get("numberOfSplitFiles")
+        .and_then(Value::as_u64)
+        .context("Sony update manifest has no valid numberOfSplitFiles")?;
+    ensure!(
+        declared_piece_count == raw_pieces.len() as u64,
+        "Sony update manifest piece count is inconsistent"
+    );
+    let mut pieces = Vec::with_capacity(raw_pieces.len());
+    for raw_piece in raw_pieces {
+        let raw_url = raw_piece
+            .get("url")
+            .and_then(Value::as_str)
+            .context("Sony update manifest package piece has no URL")?;
+        let url = validate_sony_update_url(raw_url)?;
+        ensure!(
+            url.host_str()
+                .is_some_and(|host| host.eq_ignore_ascii_case(manifest_host)),
+            "Sony update piece host does not match its manifest host"
+        );
+        let file_offset = raw_piece
+            .get("fileOffset")
+            .and_then(Value::as_u64)
+            .context("Sony update manifest package piece has no valid fileOffset")?;
+        let size_bytes = raw_piece
+            .get("fileSize")
+            .and_then(Value::as_u64)
+            .context("Sony update manifest package piece has no valid fileSize")?;
+        ensure!(
+            size_bytes > 0,
+            "Sony update manifest contains an empty package piece"
+        );
+        let sha1 = raw_piece
+            .get("hashValue")
+            .and_then(Value::as_str)
+            .map(|hash| hash.trim().to_ascii_uppercase())
+            .filter(|hash| is_hex_digest(hash, 40))
+            .context("Sony update manifest package piece has no valid SHA-1 hash")?;
+        pieces.push(UpdatePiece {
+            url: url.into(),
+            file_offset,
+            size_bytes,
+            sha1,
+        });
+    }
+    pieces.sort_by_key(|piece| piece.file_offset);
+    let mut next_offset = 0_u64;
+    for piece in &pieces {
+        ensure!(
+            piece.file_offset == next_offset,
+            "Sony update package pieces contain a gap or overlap"
+        );
+        next_offset = next_offset
+            .checked_add(piece.size_bytes)
+            .context("Sony update piece offsets overflow")?;
+    }
+    ensure!(
+        next_offset == manifest_size,
+        "Sony update pieces do not cover the declared package size"
+    );
+    let sha256 = json
+        .get("sha256")
+        .and_then(Value::as_str)
+        .map(|hash| hash.trim().to_ascii_lowercase())
+        .filter(|hash| is_hex_digest(hash, 64));
+    let url = pieces[0].url.clone();
     Ok(UpdatePackage {
         url,
-        size_bytes,
+        size_bytes: Some(manifest_size),
+        package_digest: Some(manifest_digest),
         sha256,
+        title_id: update.title_id.clone(),
+        content_id: update.content_id.clone(),
+        pieces,
     })
 }
 
@@ -137,10 +240,29 @@ pub fn download_update(
     mut progress: impl FnMut(u64, Option<u64>),
 ) -> Result<PathBuf> {
     ensure!(
+        package.title_id.eq_ignore_ascii_case(&update.title_id),
+        "update package title ID does not match the selected game"
+    );
+    ensure!(
+        package.content_id.eq_ignore_ascii_case(&update.content_id),
+        "update package content ID does not match the selected update"
+    );
+    ensure!(
         package
             .size_bytes
             .is_none_or(|size| size > 0 && size <= MAX_UPDATE_BYTES),
         "update package size is outside supported limits"
+    );
+    ensure!(
+        !package.pieces.is_empty(),
+        "Sony update manifest contains no downloadable package pieces"
+    );
+    ensure!(
+        package
+            .package_digest
+            .as_deref()
+            .is_some_and(|digest| is_hex_digest(digest, 64)),
+        "Sony update has no valid package-header digest authenticated by its TLS catalog"
     );
     let destination_dir = cache_root.join(&update.title_id).join(&update.version);
     fs::create_dir_all(&destination_dir).with_context(|| {
@@ -158,7 +280,9 @@ pub fn download_update(
     }
     let destination = destination_dir.join(format!("{}.pkg", update.title_id));
     if destination.is_file() {
-        if verify_download(&destination, package).is_ok() {
+        if verify_download(&destination, package).is_ok()
+            && verify_download_pieces(&destination, &package.pieces).is_ok()
+        {
             return Ok(destination);
         }
         fs::remove_file(&destination).with_context(|| {
@@ -169,32 +293,81 @@ pub fn download_update(
         })?;
     }
     let partial = destination.with_extension("pkg.part");
+    let piece_paths = package
+        .pieces
+        .iter()
+        .enumerate()
+        .map(|(index, _)| destination_dir.join(format!("{}.pkg.part.{index}", update.title_id)))
+        .collect::<Vec<_>>();
     for attempt in 1..=3 {
         if cancelled.load(Ordering::Relaxed) {
-            let _ = fs::remove_file(&partial);
+            cleanup_partial_files(&partial, &piece_paths);
             bail!("PS4 update download cancelled");
         }
-        let result = download_attempt(
-            &package.url,
-            &partial,
-            package,
-            cancelled.clone(),
-            &mut progress,
-        );
+        let mut downloaded_before = 0_u64;
+        let mut failed = None;
+        for (piece, piece_path) in package.pieces.iter().zip(&piece_paths) {
+            if piece_path.is_file() && verify_piece(piece_path, piece).is_ok() {
+                downloaded_before = downloaded_before.saturating_add(piece.size_bytes);
+                progress(downloaded_before, package.size_bytes);
+                continue;
+            }
+            if piece_path.exists() {
+                let _ = fs::remove_file(piece_path);
+            }
+            let mut piece_progress =
+                |bytes, _| progress(downloaded_before.saturating_add(bytes), package.size_bytes);
+            if let Err(error) = download_attempt(
+                piece,
+                piece_path,
+                package.size_bytes,
+                cancelled.clone(),
+                &mut piece_progress,
+            ) {
+                failed = Some(error);
+                break;
+            }
+            if let Err(error) = verify_piece(piece_path, piece) {
+                let _ = fs::remove_file(piece_path);
+                failed = Some(error);
+                break;
+            }
+            downloaded_before = downloaded_before.saturating_add(piece.size_bytes);
+        }
+        if let Some(error) = failed {
+            if cancelled.load(Ordering::Relaxed) {
+                cleanup_partial_files(&partial, &piece_paths);
+                return Err(error).context("PS4 update download cancelled");
+            }
+            if attempt == 3 {
+                return Err(error).context("PS4 update download failed after retries");
+            }
+            continue;
+        }
+        let result = assemble_pieces(&piece_paths, &package.pieces, &partial);
         match result {
             Ok(()) => {
-                verify_download(&partial, package)?;
+                if let Err(error) = verify_download(&partial, package) {
+                    cleanup_partial_files(&partial, &piece_paths);
+                    return Err(error).context("downloaded PS4 update failed package validation");
+                }
                 fs::rename(&partial, &destination).with_context(|| {
                     format!(
                         "could not finalize update cache file {}",
                         destination.display()
                     )
                 })?;
+                for piece_path in &piece_paths {
+                    let _ = fs::remove_file(piece_path);
+                }
                 return Ok(destination);
             }
             Err(error) => {
-                let _ = fs::remove_file(&partial);
-                if attempt == 3 || cancelled.load(Ordering::Relaxed) {
+                if cancelled.load(Ordering::Relaxed) {
+                    cleanup_partial_files(&partial, &piece_paths);
+                    return Err(error).context("PS4 update download cancelled");
+                }
+                if attempt == 3 {
                     return Err(error).context("PS4 update download failed after retries");
                 }
             }
@@ -204,9 +377,9 @@ pub fn download_update(
 }
 
 fn download_attempt(
-    url: &str,
+    piece: &UpdatePiece,
     partial: &Path,
-    package: &UpdatePackage,
+    package_size: Option<u64>,
     cancelled: Arc<AtomicBool>,
     progress: &mut impl FnMut(u64, Option<u64>),
 ) -> Result<()> {
@@ -215,63 +388,87 @@ fn download_attempt(
         .build()
         .context("could not initialize PS4 update downloader")?;
     runtime.block_on(download_attempt_async(
-        url, partial, package, cancelled, progress,
+        piece,
+        partial,
+        package_size,
+        cancelled,
+        progress,
     ))
 }
 
 async fn download_attempt_async(
-    url: &str,
+    piece: &UpdatePiece,
     partial: &Path,
-    package: &UpdatePackage,
+    package_size: Option<u64>,
     cancelled: Arc<AtomicBool>,
     progress: &mut impl FnMut(u64, Option<u64>),
 ) -> Result<()> {
-    let url = validate_playstation_url(url)?;
-    let response = match download_client()?.get(&url).send().await {
-        Ok(response) => response,
-        Err(error) if is_tls_hostname_mismatch(&error) => {
-            let host = reqwest::Url::parse(&url)
-                .ok()
-                .and_then(|url| url.host_str().map(str::to_owned))
-                .unwrap_or_else(|| "Sony's CDN".to_owned());
-            bail!(
-                "Sony's update CDN host `{host}` returned a TLS certificate that does not identify that hostname; Digital Forge refused the package download"
-            );
-        }
-        Err(error) => {
-            return Err(error).context("could not download the official PS4 update package");
-        }
+    let url = validate_sony_update_url(&piece.url)?;
+    let existing = if partial.is_file() {
+        fs::metadata(partial)?.len()
+    } else {
+        0
     };
     ensure!(
-        response.status().is_success(),
-        "update request failed with HTTP {} for {url}",
-        response.status()
+        existing <= piece.size_bytes,
+        "partial update piece is larger than the manifest size"
     );
-    validate_playstation_url(response.url().as_str())?;
-    let total = response
-        .headers()
-        .get(CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .or(package.size_bytes);
-    if let (Some(expected), Some(actual)) = (package.size_bytes, total) {
-        ensure!(
-            expected == actual,
-            "update download size differs from the published size"
-        );
+    if existing == piece.size_bytes {
+        return Ok(());
     }
-    if let Some(size) = total {
+    let mut request = download_client()?.get(url.as_str());
+    if existing > 0 {
+        request = request.header(RANGE, format!("bytes={existing}-"));
+    }
+    let response = request.send().await.map_err(|error| {
+        network_error(
+            error,
+            "could not download the official PS4 update package piece",
+            url.as_str(),
+        )
+    })?;
+    ensure!(
+        response.url() == &url,
+        "Sony update download redirected away from its catalog URL"
+    );
+    let append = match response.status() {
+        reqwest::StatusCode::OK => false,
+        reqwest::StatusCode::PARTIAL_CONTENT => {
+            let value = response
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .context("Sony range response is missing Content-Range")?;
+            let (start, end, total) = parse_content_range(value)?;
+            ensure!(
+                start == existing
+                    && end >= start
+                    && end.checked_add(1) == Some(total)
+                    && total == piece.size_bytes,
+                "Sony range response does not match the requested update piece range"
+            );
+            if existing > 0 { true } else { false }
+        }
+        status => bail!("update request failed with HTTP {status} for {url}"),
+    };
+    if let Some(content_length) = response.content_length() {
+        let expected_remaining = if append {
+            piece.size_bytes - existing
+        } else {
+            piece.size_bytes
+        };
         ensure!(
-            size > 0 && size <= MAX_UPDATE_BYTES,
-            "update response size is outside supported limits"
+            content_length == expected_remaining,
+            "update piece response length differs from the published size"
         );
     }
     let mut file = OpenOptions::new()
         .create(true)
-        .truncate(true)
         .write(true)
+        .append(append)
+        .truncate(!append)
         .open(partial)?;
-    let mut downloaded = 0_u64;
+    let mut downloaded = if append { existing } else { 0 };
     let mut stream = response.bytes_stream();
     loop {
         ensure!(
@@ -287,27 +484,26 @@ async fn download_attempt_async(
         let chunk = chunk.context("update download stream failed")?;
         downloaded = downloaded.saturating_add(chunk.len() as u64);
         ensure!(
-            downloaded <= MAX_UPDATE_BYTES,
-            "update download exceeded the safety limit"
+            downloaded <= piece.size_bytes,
+            "update piece exceeded the published size"
         );
         file.write_all(&chunk)?;
-        progress(downloaded, total);
+        progress(downloaded, package_size);
     }
     file.flush()?;
     file.sync_all()?;
-    if let Some(expected) = package.size_bytes {
-        ensure!(
-            downloaded == expected,
-            "update download ended early ({downloaded} of {expected} bytes)"
-        );
-    }
+    ensure!(
+        downloaded == piece.size_bytes,
+        "update piece ended early ({downloaded} of {} bytes)",
+        piece.size_bytes
+    );
     Ok(())
 }
 
 fn verify_download(path: &Path, package: &UpdatePackage) -> Result<()> {
     let metadata = fs::metadata(path)?;
     ensure!(
-        metadata.len() >= 0x100,
+        metadata.len() >= 0x1000,
         "download is too small to be a PS4 PKG"
     );
     if let Some(expected) = package.size_bytes {
@@ -322,6 +518,34 @@ fn verify_download(path: &Path, package: &UpdatePackage) -> Result<()> {
     ensure!(
         magic == *b"\x7fCNT",
         "downloaded update is not a PS4 PKG (invalid magic)"
+    );
+    let mut header = [0_u8; 0x1000];
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut header)?;
+    let header_digest = &header[0xFE0..0x1000];
+    let expected_digest = package
+        .package_digest
+        .as_deref()
+        .context("missing Sony package-header digest")?;
+    let actual_digest = header_digest
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<String>();
+    ensure!(
+        actual_digest.eq_ignore_ascii_case(expected_digest),
+        "downloaded PKG header digest does not match Sony's TLS-authenticated catalog"
+    );
+    let content_id = crate::forge::detector::parse_pkg_content_id(&header)
+        .context("downloaded PS4 update has no valid package content ID")?;
+    ensure!(
+        content_id.eq_ignore_ascii_case(&package.content_id),
+        "downloaded PS4 update content ID does not match update metadata"
+    );
+    let title_id = crate::forge::detector::title_id_from_content_id(&content_id)
+        .context("downloaded PS4 update has no valid title ID")?;
+    ensure!(
+        title_id.eq_ignore_ascii_case(&package.title_id),
+        "downloaded PS4 update title ID does not match selected game"
     );
     if let Some(expected) = &package.sha256 {
         let mut file = File::open(path)?;
@@ -372,6 +596,7 @@ fn parse_update_xml(title_id: &str, metadata_url: &str, xml: &[u8]) -> Result<La
                     let mut content_id = None;
                     let mut manifest_url = None;
                     let mut size_bytes = None;
+                    let mut package_digest = None;
                     for attr in event.attributes() {
                         let attr = attr.context("invalid attribute in PS4 update XML")?;
                         let value = attr
@@ -385,10 +610,17 @@ fn parse_update_xml(title_id: &str, metadata_url: &str, xml: &[u8]) -> Result<La
                             b"content_id" => content_id = Some(value),
                             b"manifest_url" => manifest_url = Some(value),
                             b"size" => size_bytes = value.parse::<u64>().ok(),
+                            b"digest" => package_digest = Some(value.trim().to_ascii_uppercase()),
                             _ => {}
                         }
                     }
-                    package = Some((version, content_id, manifest_url, size_bytes));
+                    package = Some((
+                        version,
+                        content_id,
+                        manifest_url,
+                        size_bytes,
+                        package_digest,
+                    ));
                 }
             }
             Event::Text(text) if in_paramsfo && title.is_none() => {
@@ -406,7 +638,7 @@ fn parse_update_xml(title_id: &str, metadata_url: &str, xml: &[u8]) -> Result<La
         buf.clear();
     }
     ensure!(root_seen, "PS4 update metadata is empty");
-    let (version, content_id, manifest_url, size_bytes) =
+    let (version, content_id, manifest_url, size_bytes, package_digest) =
         package.context("Sony update feed has no package entry")?;
     let version = version.context("Sony update entry has no version")?;
     ensure!(
@@ -425,7 +657,9 @@ fn parse_update_xml(title_id: &str, metadata_url: &str, xml: &[u8]) -> Result<La
         "Sony update content ID does not match base-game title ID {title_id}"
     );
     let manifest_url =
-        validate_playstation_url(&manifest_url.context("Sony update entry has no manifest URL")?)?;
+        validate_sony_update_url(&manifest_url.context("Sony update entry has no manifest URL")?)?
+            .into();
+    let package_digest = package_digest.filter(|digest| is_hex_digest(digest, 64));
     if let Some(size) = size_bytes {
         ensure!(
             size > 0 && size <= MAX_UPDATE_BYTES,
@@ -438,6 +672,7 @@ fn parse_update_xml(title_id: &str, metadata_url: &str, xml: &[u8]) -> Result<La
         version,
         content_id,
         size_bytes,
+        package_digest,
         manifest_url,
         metadata_url: metadata_url.to_owned(),
     })
@@ -498,6 +733,142 @@ fn validate_playstation_url(raw: &str) -> Result<String> {
     Ok(url.into())
 }
 
+/// Preserve Sony's advertised scheme. Sony's authenticated catalog currently
+/// advertises HTTP PlayGo manifests and pieces; the app accepts them only after
+/// cross-checking the manifest against the TLS catalog and verifying every
+/// piece before using the PKG.
+fn validate_sony_update_url(raw: &str) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(raw).context("Sony update metadata contains an invalid URL")?;
+    ensure!(
+        url.scheme() == "https" || url.scheme() == "http",
+        "unsupported update URL scheme"
+    );
+    ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "Sony update URL must not contain credentials"
+    );
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    ensure!(
+        host == "playstation.net" || host.ends_with(".playstation.net"),
+        "update source is not hosted by playstation.net: {host}"
+    );
+    Ok(url)
+}
+
+fn checked_update_response(response: Response, request_url: &reqwest::Url) -> Result<Response> {
+    ensure!(
+        response.status().is_success(),
+        "update request failed with HTTP {} for {request_url}",
+        response.status()
+    );
+    ensure!(
+        response.url().host_str() == request_url.host_str(),
+        "Sony update request redirected to another host"
+    );
+    ensure!(
+        response.url().scheme() == request_url.scheme(),
+        "Sony update request changed transport scheme"
+    );
+    Ok(response)
+}
+
+fn update_transfer_client() -> Result<Client> {
+    Client::builder()
+        .add_root_certificate(sony_root_certificate()?)
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(90))
+        .user_agent(concat!("DigitalForge/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("could not initialize Sony update manifest client")
+}
+
+fn parse_content_range(value: &str) -> Result<(u64, u64, u64)> {
+    let value = value
+        .strip_prefix("bytes ")
+        .context("invalid Content-Range unit")?;
+    let (range, total) = value.split_once('/').context("invalid Content-Range")?;
+    let (start, end) = range.split_once('-').context("invalid Content-Range")?;
+    Ok((start.parse()?, end.parse()?, total.parse()?))
+}
+
+fn is_hex_digest(value: &str, length: usize) -> bool {
+    value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn verify_piece(path: &Path, piece: &UpdatePiece) -> Result<()> {
+    ensure!(
+        fs::metadata(path)?.len() == piece.size_bytes,
+        "downloaded update piece size does not match Sony's manifest"
+    );
+    let mut file = File::open(path)?;
+    let mut hash = Sha1::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    let actual = format!("{:X}", hash.finalize());
+    ensure!(
+        actual.eq_ignore_ascii_case(&piece.sha1),
+        "downloaded update piece SHA-1 does not match Sony's manifest"
+    );
+    Ok(())
+}
+
+fn verify_download_pieces(path: &Path, pieces: &[UpdatePiece]) -> Result<()> {
+    let mut file = File::open(path)?;
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    for piece in pieces {
+        file.seek(SeekFrom::Start(piece.file_offset))?;
+        let mut remaining = piece.size_bytes;
+        let mut hash = Sha1::new();
+        while remaining > 0 {
+            let limit = buffer.len().min(remaining as usize);
+            let count = file.read(&mut buffer[..limit])?;
+            ensure!(count > 0, "cached update ended inside a manifest piece");
+            hash.update(&buffer[..count]);
+            remaining -= count as u64;
+        }
+        let actual = format!("{:X}", hash.finalize());
+        ensure!(
+            actual.eq_ignore_ascii_case(&piece.sha1),
+            "cached update piece SHA-1 does not match Sony's manifest"
+        );
+    }
+    Ok(())
+}
+
+fn assemble_pieces(paths: &[PathBuf], pieces: &[UpdatePiece], output: &Path) -> Result<()> {
+    ensure!(
+        paths.len() == pieces.len(),
+        "update piece path count is inconsistent"
+    );
+    let mut output_file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(output)?;
+    for (path, piece) in paths.iter().zip(pieces) {
+        verify_piece(path, piece)?;
+        let mut input = File::open(path)?;
+        std::io::copy(&mut input, &mut output_file)?;
+    }
+    output_file.flush()?;
+    output_file.sync_all()?;
+    Ok(())
+}
+
+fn cleanup_partial_files(partial: &Path, pieces: &[PathBuf]) {
+    let _ = fs::remove_file(partial);
+    for piece in pieces {
+        let _ = fs::remove_file(piece);
+    }
+}
+
 fn checked_response(response: Response, request_url: &str) -> Result<Response> {
     ensure!(
         response.status().is_success(),
@@ -523,6 +894,16 @@ fn is_tls_hostname_mismatch(error: &(dyn std::error::Error + 'static)) -> bool {
         cause = error.source();
     }
     false
+}
+
+fn network_error(error: reqwest::Error, action: &str, url: &str) -> anyhow::Error {
+    if is_tls_hostname_mismatch(&error) {
+        anyhow::anyhow!(
+            "{action}: TLS certificate hostname validation failed for {url}; Digital Forge refused the connection"
+        )
+    } else {
+        anyhow::Error::new(error).context(format!("{action} for {url}"))
+    }
 }
 
 fn read_limited(response: Response, limit: u64) -> Result<Vec<u8>> {
@@ -587,7 +968,9 @@ fn http_client() -> Result<Client> {
 fn download_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .add_root_certificate(sony_root_certificate()?)
-        .redirect(sony_redirect_policy())
+        // Sony's catalog intentionally publishes HTTP PlayGo URLs. Never
+        // follow redirects for them: an unexpected host/scheme change fails.
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
         // A per-chunk idle timeout below allows very large packages to take
         // longer than a fixed total duration while still retrying stalled IO.
@@ -601,7 +984,7 @@ fn download_client() -> Result<reqwest::Client> {
 mod tests {
     use super::*;
 
-    const XML: &[u8] = br#"<?xml version="1.0"?><titlepatch titleid="CUSA00001"><tag><package version="01.07" content_id="IP9100-CUSA00001_00-PLAYROOM00000000" size="123456" manifest_url="https://gs2.ww.prod.dl.playstation.net/update.json"><paramsfo><title>THE PLAYROOM</title></paramsfo></package></tag></titlepatch>"#;
+    const XML: &[u8] = br#"<?xml version="1.0"?><titlepatch titleid="CUSA00001"><tag><package version="01.07" content_id="IP9100-CUSA00001_00-PLAYROOM00000000" size="123456" digest="0000000000000000000000000000000000000000000000000000000000000000" manifest_url="http://gs2.ww.prod.dl.playstation.net/update.json"><paramsfo><title>THE PLAYROOM</title></paramsfo></package></tag></titlepatch>"#;
 
     #[test]
     fn sony_root_ca_is_valid_pem_with_the_pinned_fingerprint() {
@@ -609,23 +992,42 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a live, TLS-validated connection to Sony's update feed"]
-    fn live_sony_update_feed_lookup() {
+    #[ignore = "downloads the live public CUSA00552 update from Sony"]
+    fn live_sony_update_download_and_pkg_validation() {
         let update = latest_update("CUSA00552").expect("live Sony feed request must succeed");
         let update = update.expect("Sony should publish an update for the fixture title");
         eprintln!(
             "Sony update catalog: {} — {} ({:?} bytes)",
             update.title_id, update.version, update.size_bytes
         );
-        match update_package(&update) {
-            Ok(package) => eprintln!(
-                "Sony package manifest accepted; package size {:?} bytes",
-                package.size_bytes
-            ),
-            Err(error) => eprintln!("Sony package manifest unavailable: {error:#}"),
-        }
+        let package =
+            update_package(&update).expect("Sony manifest must pass authenticated validation");
+        eprintln!(
+            "Sony package manifest accepted; package size {:?} bytes",
+            package.size_bytes
+        );
         assert_eq!(update.title_id, "CUSA00552");
         assert!(!update.version.is_empty());
+        let cache =
+            std::env::temp_dir().join(format!("digital-forge-live-update-{}", std::process::id()));
+        let path = download_update(
+            &update,
+            &package,
+            &cache,
+            Arc::new(AtomicBool::new(false)),
+            |done, total| {
+                if done == total.unwrap_or_default() || done % (64 * 1024 * 1024) < 1024 * 1024 {
+                    eprintln!("Sony update download: {done}/{total:?} bytes");
+                }
+            },
+        )
+        .expect("Sony update must download and pass PKG validation");
+        assert_eq!(
+            fs::metadata(&path).unwrap().len(),
+            package.size_bytes.unwrap()
+        );
+        verify_download(&path, &package).expect("cached update must pass package verification");
+        eprintln!("Verified live Sony update PKG at {}", path.display());
     }
 
     #[test]
@@ -659,6 +1061,99 @@ mod tests {
         assert_eq!(update.version, "01.07");
         assert_eq!(update.content_id, "IP9100-CUSA00001_00-PLAYROOM00000000");
         assert_eq!(update.size_bytes, Some(123456));
+        assert_eq!(
+            update.package_digest.as_deref(),
+            Some("0".repeat(64).as_str())
+        );
+    }
+
+    fn manifest_fixture_update() -> LatestUpdate {
+        LatestUpdate {
+            title_id: "CUSA00001".into(),
+            title: None,
+            version: "01.07".into(),
+            content_id: "IP9100-CUSA00001_00-PLAYROOM00000000".into(),
+            size_bytes: Some(10),
+            package_digest: Some("A".repeat(64)),
+            manifest_url: "http://gs2.ww.prod.dl.playstation.net/update.json".into(),
+            metadata_url: "https://gs-sec.ww.np.dl.playstation.net/update.xml".into(),
+        }
+    }
+
+    #[test]
+    fn sony_manifest_parses_piece_metadata_and_requires_catalog_digest_match() {
+        let update = manifest_fixture_update();
+        let manifest = format!(
+            r#"{{"originalFileSize":10,"packageDigest":"{}","numberOfSplitFiles":2,"pieces":[{{"url":"http://gs2.ww.prod.dl.playstation.net/piece0.pkg","fileOffset":0,"fileSize":4,"hashValue":"{}"}},{{"url":"http://gs2.ww.prod.dl.playstation.net/piece1.pkg","fileOffset":4,"fileSize":6,"hashValue":"{}"}}]}}"#,
+            "A".repeat(64),
+            "B".repeat(40),
+            "C".repeat(40)
+        );
+        let parsed = parse_update_manifest(
+            &update,
+            &reqwest::Url::parse(&update.manifest_url).unwrap(),
+            manifest.as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(parsed.size_bytes, Some(10));
+        assert_eq!(parsed.pieces.len(), 2);
+        assert_eq!(parsed.pieces[1].file_offset, 4);
+        assert_eq!(
+            parsed.package_digest.as_deref(),
+            Some("A".repeat(64).as_str())
+        );
+    }
+
+    #[test]
+    fn sony_manifest_rejects_digest_mismatch_gaps_and_cross_host_pieces() {
+        let update = manifest_fixture_update();
+        let url = reqwest::Url::parse(&update.manifest_url).unwrap();
+        let valid = format!(
+            r#"{{"originalFileSize":10,"packageDigest":"{}","numberOfSplitFiles":1,"pieces":[{{"url":"http://gs2.ww.prod.dl.playstation.net/piece.pkg","fileOffset":0,"fileSize":10,"hashValue":"{}"}}]}}"#,
+            "A".repeat(64),
+            "B".repeat(40)
+        );
+        assert!(
+            parse_update_manifest(
+                &update,
+                &url,
+                valid.replace(&"A".repeat(64), &"D".repeat(64)).as_bytes()
+            )
+            .is_err()
+        );
+        assert!(
+            parse_update_manifest(
+                &update,
+                &url,
+                valid
+                    .replace("\"fileOffset\":0", "\"fileOffset\":1")
+                    .as_bytes()
+            )
+            .is_err()
+        );
+        assert!(
+            parse_update_manifest(
+                &update,
+                &url,
+                valid
+                    .replace(
+                        "gs2.ww.prod.dl.playstation.net/piece.pkg",
+                        "evil.example/piece.pkg"
+                    )
+                    .as_bytes()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_http_range_response_metadata() {
+        assert_eq!(
+            parse_content_range("bytes 100-199/200").unwrap(),
+            (100, 199, 200)
+        );
+        assert!(parse_content_range("items 100-199/200").is_err());
+        assert!(parse_content_range("bytes 100/200").is_err());
     }
 
     #[test]
@@ -674,11 +1169,13 @@ mod tests {
     }
 
     #[test]
-    fn non_sony_urls_and_http_manifest_hops_are_rejected_or_upgraded() {
+    fn non_sony_urls_are_rejected_and_advertised_http_is_preserved() {
         assert!(validate_playstation_url("https://example.com/update.pkg").is_err());
         assert_eq!(
-            validate_playstation_url("http://gs2.ww.prod.dl.playstation.net/a.pkg").unwrap(),
-            "https://gs2.ww.prod.dl.playstation.net/a.pkg"
+            validate_sony_update_url("http://gs2.ww.prod.dl.playstation.net/a.pkg")
+                .unwrap()
+                .as_str(),
+            "http://gs2.ww.prod.dl.playstation.net/a.pkg"
         );
     }
 
@@ -688,19 +1185,67 @@ mod tests {
             "digital-forge-ps4-update-check-{}.pkg",
             std::process::id()
         ));
-        let mut bytes = vec![0_u8; 0x100];
+        let mut bytes = vec![0_u8; 0x1000];
         bytes[..4].copy_from_slice(b"\x7fCNT");
+        bytes[0x40..0x40 + 35].copy_from_slice(b"UP9000-CUSA00001_00-PLAYROOM0000000");
+        let header_digest = "AB".repeat(32);
+        for (index, chunk) in header_digest.as_bytes().chunks_exact(2).enumerate() {
+            bytes[0xFE0 + index] =
+                u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
+        }
         fs::write(&path, &bytes).unwrap();
         let digest = format!("{:x}", Sha256::digest(&bytes));
         let package = UpdatePackage {
-            url: "https://gs2.ww.prod.dl.playstation.net/update.pkg".to_owned(),
+            url: "http://gs2.ww.prod.dl.playstation.net/update.pkg".to_owned(),
             size_bytes: Some(bytes.len() as u64),
+            package_digest: Some(header_digest),
             sha256: Some(digest),
+            title_id: "CUSA00001".to_owned(),
+            content_id: "UP9000-CUSA00001_00-PLAYROOM0000000".to_owned(),
+            pieces: vec![],
         };
         assert!(verify_download(&path, &package).is_ok());
         let mut bad_package = package;
         bad_package.sha256 = Some("0".repeat(64));
         assert!(verify_download(&path, &bad_package).is_err());
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore = "uses the locally cached, live Sony CUSA00552 update PKG"]
+    fn cached_live_sony_update_matches_feed_and_piece_hashes() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp/CUSA00552-A0111-update.pkg");
+        let update = LatestUpdate {
+            title_id: "CUSA00552".into(),
+            title: Some("The Last of Us Remastered".into()),
+            version: "01.11".into(),
+            content_id: "UP9000-CUSA00552_00-THELASTOFUS00000".into(),
+            size_bytes: Some(369_229_824),
+            package_digest: Some(
+                "83AA95883144F786C3BEACBCD72F158214B8D57B6E5D94A01DCD132B922BE398".into(),
+            ),
+            manifest_url: String::new(),
+            metadata_url: String::new(),
+        };
+        let package = UpdatePackage {
+            url: String::new(),
+            size_bytes: update.size_bytes,
+            package_digest: update.package_digest.clone(),
+            sha256: None,
+            title_id: update.title_id.clone(),
+            content_id: update.content_id.clone(),
+            pieces: vec![UpdatePiece {
+                url: String::new(),
+                file_offset: 0,
+                size_bytes: 369_229_824,
+                sha1: "1DC7552C27228AD69C297EE1A1A4FEE5C2AB67CA".into(),
+            }],
+        };
+        verify_download(&path, &package)
+            .expect("real Sony update should pass PKG identity validation");
+        verify_piece(&path, &package.pieces[0])
+            .expect("real Sony update should match its piece hash");
+        verify_download_pieces(&path, &package.pieces)
+            .expect("cached Sony update should recheck its piece hash");
     }
 }
