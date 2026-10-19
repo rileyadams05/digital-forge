@@ -1,13 +1,10 @@
 (() => {
   const api = String(window.DF_SUCCESS_API || "").replace(/\/+$/, "");
   const form = document.querySelector("#success-report-form");
-  const signIn = document.querySelector("#github-sign-in");
-  const signOut = document.querySelector("#github-sign-out");
-  const account = document.querySelector("#github-account");
   const notice = document.querySelector("#success-api-notice");
   const status = document.querySelector("#success-report-status");
   const idField = document.querySelector("#report-game-id");
-  if (!form || !signIn || !status) return;
+  if (!form || !status) return;
 
   let session = sessionStorage.getItem("df-github-session") || "";
   const fragment = new URLSearchParams(location.hash.slice(1));
@@ -65,49 +62,53 @@
     });
     logField.addEventListener("change", syncLogName);
   }
-  const setSignedIn = login => {
-    account.hidden = !login;
-    account.textContent = login ? "Signed in as @" + login : "";
-    signIn.hidden = Boolean(login);
-    signOut.hidden = !login;
-    form.hidden = !login;
-  };
   const authHeader = () => ({ Authorization: "Bearer " + session });
+  const beginAuthorization = () => {
+    const returnTo = location.pathname + location.search;
+    location.replace(api + "/auth/start?return_to=" + encodeURIComponent(returnTo));
+  };
 
   if (!api || api.includes("__SUCCESS_API_URL__")) {
     notice.hidden = false;
-    signIn.disabled = true;
-    signIn.setAttribute("aria-disabled", "true");
-    setStatus("Success reporting is not connected yet.");
+    setStatus("Online success reporting is temporarily unavailable.", true);
     return;
   }
 
-  signIn.addEventListener("click", () => {
-    const returnTo = location.pathname + location.search;
-    location.href = api + "/auth/start?return_to=" + encodeURIComponent(returnTo);
-  });
-  signOut.addEventListener("click", () => {
-    session = "";
-    sessionStorage.removeItem("df-github-session");
-    setSignedIn("");
-    setStatus("Signed out of GitHub.");
-  });
-  if (session) {
+  if (query.get("login") === "cancelled") {
+    setStatus("GitHub authorization was cancelled. Reload this page to try again.", true);
+  } else if (!session) {
+    setStatus("Connecting to GitHub…");
+    beginAuthorization();
+  } else {
     fetch(api + "/api/me", { headers: authHeader() })
-      .then(response => response.ok ? response.json() : Promise.reject())
-      .then(data => setSignedIn(data.login))
-      .catch(() => {
+      .then(response => {
+        if (response.ok) return response.json();
+        const error = new Error("GitHub could not verify the current session.");
+        error.expired = response.status === 401 || response.status === 403;
+        throw error;
+      })
+      .then(data => {
+        if (!data?.login) throw new Error("GitHub returned an unreadable session.");
+        form.hidden = false;
+        setStatus("");
+      })
+      .catch(error => {
         session = "";
         sessionStorage.removeItem("df-github-session");
-        setSignedIn("");
-        setStatus("Your GitHub sign-in expired. Sign in again to submit.");
+        form.hidden = true;
+        if (error.expired) {
+          setStatus("Your GitHub connection expired. Reconnecting…");
+          beginAuthorization();
+        } else {
+          setStatus("Could not verify the GitHub connection. Refresh this page to try again.", true);
+        }
       });
-  } else setSignedIn("");
+  }
 
   form.addEventListener("submit", async event => {
     event.preventDefault();
     if (!session) {
-      setStatus("Sign in with GitHub before submitting.", true);
+      setStatus("The GitHub connection expired. Refresh this page to reconnect.", true);
       return;
     }
     const file = form.elements.game_log.files?.[0];

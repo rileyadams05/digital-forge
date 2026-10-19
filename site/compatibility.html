@@ -24,14 +24,9 @@
     <div class="report-layout">
     <section id="success-report" aria-labelledby="success-report-title">
       <h2 id="success-report-title">Report a successful test</h2>
-      <p>Sign in with GitHub, enter the game details, and attach the Digital Forge game log. The website prepares a pull request in the project repository. Your report is published only after a project reviewer merges it.</p>
+      <p>This page connects to GitHub automatically. Once connected, enter the game details and attach the Digital Forge game log. The website prepares a pull request in the project repository. Your report is published only after a project reviewer merges it.</p>
       <p class="form-note">The .log or .txt file is added to the pull request in the public Digital Forge repository, so it is visible to the public before and after review. Remove personal or device-identifying information first. Do not attach game files.</p>
       <p id="success-api-notice" class="callout" hidden>Online success reporting is temporarily unavailable. Please try again later.</p>
-      <div class="auth-controls">
-        <button class="button secondary" id="github-sign-in" type="button">Sign in with GitHub</button>
-        <span id="github-account" class="form-note" hidden></span>
-        <button class="home-control" id="github-sign-out" type="button" hidden>Sign out</button>
-      </div>
       <form id="success-report-form" class="report-form" hidden>
         <label for="report-game-id">Game ID</label>
         <input id="report-game-id" name="game_id" required maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_-]{2,31}" autocomplete="off">
@@ -75,6 +70,6 @@
   </main>
   <footer><span>Successful tests are reviewed in repository pull requests; issues are for failures.</span><a href="index.html">Search ↗</a></footer>
   <script src="assets/success-config.js?v=1"></script>
-  <script src="assets/success-reports.js?v=2"></script>
+  <script src="assets/success-reports.js?v=3"></script>
 </body>
 </html>

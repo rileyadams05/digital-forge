@@ -119,6 +119,10 @@ def main():
     success_reports = (ROOT / "assets" / "success-reports.js").read_text(encoding="utf-8") if (ROOT / "assets" / "success-reports.js").exists() else ""
     if "api/success-reports" not in success_reports or "github_session" not in success_reports:
         errors.append("Successful test reporting is missing its GitHub sign-in or submission flow")
+    if 'api + "/auth/start?return_to="' not in success_reports or "location.replace" not in success_reports:
+        errors.append("Successful test reporting must begin GitHub authorization automatically")
+    if 'id="github-sign-in"' in (ROOT / "compatibility.html").read_text(encoding="utf-8"):
+        errors.append("Compatibility page must not show a manual GitHub sign-in button")
     if 'id="success-report-form"' not in (ROOT / "compatibility.html").read_text(encoding="utf-8"):
         errors.append("Compatibility page is missing its successful test submission form")
     compatibility_page = (ROOT / "compatibility.html").read_text(encoding="utf-8")
