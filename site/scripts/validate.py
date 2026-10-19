@@ -16,7 +16,6 @@ REQUIRED_PAGES = (
     "compatibility.html",
     "formats.html",
     "guides/itemzflow.html",
-    "guides/pkg.html",
     "guides/fpkg.html",
     "guides/iso2god.html",
 )
@@ -97,7 +96,7 @@ def main():
                     errors.append(f"Missing anchor: {relative} -> {link}")
 
     home = (ROOT / "index.html").read_text(encoding="utf-8")
-    required_home_terms = ("Digital Forge", 'id="search-form"', 'id="search-mode"', 'id="site-search"', 'value="guides"', 'value="games"', "What is Digital Forge?", "Submit a successful test", 'href="compatibility.html#success-report"', 'id="guide-library"', 'href="guides/itemzflow.html"', 'href="guides/fpkg.html"', 'href="guides/pkg.html"', 'href="guides/iso2god.html"')
+    required_home_terms = ("Digital Forge", 'id="search-form"', 'id="search-mode"', 'id="site-search"', 'value="guides"', 'value="games"', "What is Digital Forge?", "Submit a successful test", 'href="compatibility.html#success-report"', 'id="search-results"', 'href="guides/pkg.html"')
     for term in required_home_terms:
         if term not in home:
             errors.append(f"Homepage is missing required content: {term}")
@@ -109,6 +108,12 @@ def main():
         errors.append("Homepage search should submit with Enter and must not show a Search button")
     if 'id="home-button"' not in home or 'class="home-control"' not in home:
         errors.append("Homepage is missing its Home control")
+    if 'id="guide-library"' in home or 'class="guide-library"' in home:
+        errors.append("Homepage should show guide cards only after a matching search")
+    if '<h3>PKG guide</h3>' in home or "guides/pkg.html" in home:
+        errors.append("Homepage must not advertise a standalone PKG guide")
+    if (ROOT / "guides" / "pkg.html").exists():
+        errors.append("The obsolete PKG guide page must be removed")
 
     search = (ROOT / "assets/search.js").read_text(encoding="utf-8")
     for term in ("itemflows", "api.github.com/search/issues", 'searchMode === "guides"', "REPORT_FORM", 'rel="noopener noreferrer"'):
@@ -116,6 +121,10 @@ def main():
             errors.append(f"Search integration is missing required behavior marker: {term}")
     if any(marker in search for marker in ("emulatorLookups", "consolesWithoutVerifiedList", 'mode?.value === "emulators"', "Emulators: enter")):
         errors.append("Emulator searching must not be a homepage search mode")
+    if 'title: "PKG guide"' in search or "guides/pkg.html" in search:
+        errors.append("Guide search must not offer a standalone PKG guide")
+    if "matchedConsole" not in search or "Console or conversion type" not in search:
+        errors.append("Guide search must accept a console name or conversion type")
     if any(marker in search for marker in ("game-identifiers.json.gz", "titlescreen.org/api/v1/search", "loadGameIndex", "lookupGameIdentity")):
         errors.append("Games search should use GitHub Issues only, without a separate title identifier index")
     success_reports = (ROOT / "assets" / "success-reports.js").read_text(encoding="utf-8") if (ROOT / "assets" / "success-reports.js").exists() else ""
