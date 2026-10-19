@@ -8,6 +8,8 @@ import sys
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).resolve().parents[1]
+# Repository-only checks must stay anchored to the checkout when ROOT is a built Pages artifact.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 REQUIRED_PAGES = (
     "index.html",
     "about.html",
@@ -191,13 +193,13 @@ def main():
         errors.append("Compatibility page is missing its report and failure layout")
     if 'id="report-drop-zone"' not in compatibility or 'id="report-log-hint"' not in compatibility:
         errors.append("Compatibility page is missing its accessible game-log drop zone")
-    api_source = (ROOT.parent / "site-api" / "src" / "index.mjs").read_text(encoding="utf-8")
+    api_source = (REPOSITORY_ROOT / "site-api" / "src" / "index.mjs").read_text(encoding="utf-8")
     if 'form.get("description")' not in api_source or 'format, description' not in api_source:
         errors.append("Reporting API must accept and publish the report description")
     if 'field(form, "console"' in api_source or 'form.get("environment")' in api_source or 'form.get("digital_forge_version")' in api_source:
         errors.append("Reporting API should not require the removed report fields")
 
-    issue_template_path = ROOT.parent / ".github" / "ISSUE_TEMPLATE" / "compatibility-report.yml"
+    issue_template_path = REPOSITORY_ROOT / ".github" / "ISSUE_TEMPLATE" / "compatibility-report.yml"
     if issue_template_path.exists():
         issue_template = issue_template_path.read_text(encoding="utf-8")
         if 'title: "[Game failure] "' not in issue_template or "Tested and working" in issue_template:
