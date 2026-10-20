@@ -864,10 +864,14 @@ fn run_drag_and_drop_pipeline_logged(
     // populated sibling Update directory was already classified above and
     // must proceed without asking. When no usable update is present, pause
     // here before any console-specific usage or destination prompts.
-    if effective_sources.len() == 1
-        && effective_sources[0].is_dir()
-        && !classified_has_usable_update(&classified)
-    {
+    if should_prompt_for_external_update_folder(
+        classified.platform,
+        effective_sources.len(),
+        effective_sources
+            .first()
+            .is_some_and(|source| source.is_dir()),
+        classified_has_usable_update(&classified),
+    ) {
         println!(
             "\nNo game update was detected.\n\nDo you have an update folder?\n\nDrag and drop your Update folder here,\nor press Enter to continue without an update.\n"
         );
@@ -1328,6 +1332,18 @@ fn classified_has_usable_update(classified: &ClassifiedSourceSet) -> bool {
                     .map(|mut entries| entries.next().is_some())
                     .unwrap_or(false))
     })
+}
+
+fn should_prompt_for_external_update_folder(
+    platform: iso2god::forge::Platform,
+    source_count: usize,
+    has_single_folder_source: bool,
+    has_usable_update: bool,
+) -> bool {
+    platform != iso2god::forge::Platform::PlayStation4
+        && source_count == 1
+        && has_single_folder_source
+        && !has_usable_update
 }
 
 fn measure_source_payload_bytes(sources: &[PathBuf]) -> Result<u64, Error> {
@@ -7419,6 +7435,22 @@ mod manual_import_tests {
             ps3_optional_update_prompt_text(),
             "No game update was detected.\n\nDo you have an update folder?\n\nDrag and drop your Update folder here,\nor press Enter to continue without an update."
         );
+    }
+
+    #[test]
+    fn ps4_game_folder_skips_manual_update_folder_prompt() {
+        assert!(!should_prompt_for_external_update_folder(
+            iso2god::forge::Platform::PlayStation4,
+            1,
+            true,
+            false,
+        ));
+        assert!(should_prompt_for_external_update_folder(
+            iso2god::forge::Platform::Xbox360,
+            1,
+            true,
+            false,
+        ));
     }
 
     #[test]
