@@ -166,7 +166,8 @@ applies to the current stage; the game has not yet finished copying to USB.*
 Leave the drive connected until the final completion message. Archive imports also verify the USB
 copy after writing it. Direct ISO-to-USB conversion checks the prepared package before copying but
 does not perform that same separate destination-file verification afterward.
-See [progress and completion](#read-progress-and-confirm-completion) for what each stage means.`r`n
+See [progress and completion](#read-progress-and-confirm-completion) for what each stage means.
+
 ### Step 4 — Eject only after success
 
 Wait for the final **Complete** success message with no operation error. Safely eject the drive
@@ -313,7 +314,10 @@ Copying a game and adding it to the dashboard's library are separate steps.
 
 Look on the drive you actually used, rather than relying on the game's cover appearing in the library.
 
-| Format | Path relative to the USB drive root |`r`n| --- | --- |`r`n| GOD | `Content/0000000000000000/<TitleID>/00007000/` |`r`n| Extracted game | `Games/<Game Name>/default.xex` plus the rest of the game |
+| Format | Path relative to the USB drive root |
+| --- | --- |
+| GOD | `Content/0000000000000000/<TitleID>/00007000/` |
+| Extracted game | `Games/<Game Name>/default.xex` plus the rest of the game |
 
 `<TitleID>` means the game's own title ID, not a folder literally named TitleID. The computer's
 drive letter is not the Xbox's device name.
