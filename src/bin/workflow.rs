@@ -353,20 +353,33 @@ fn inspect_candidate(path: &Path, hint: Option<ContentRole>) -> ScannedCandidate
         return candidate;
     }
 
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if matches!(ext.as_str(), "rar" | "zip" | "7z") {
-        let entry_volume = match iso2god::forge::archive::ArchiveEngine::classify(path) {
-            iso2god::forge::archive::ArchiveKind::MultiVolume { first_volume, .. } => first_volume,
-            _ => path.to_path_buf(),
+    let archive_kind = iso2god::forge::archive::ArchiveEngine::classify(path);
+    if matches!(
+        &archive_kind,
+        iso2god::forge::archive::ArchiveKind::SingleVolume(_)
+            | iso2god::forge::archive::ArchiveKind::MultiVolume { .. }
+    ) {
+        let entry_volume = match archive_kind {
+            iso2god::forge::archive::ArchiveKind::MultiVolume {
+                first_volume,
+                missing_volumes,
+                ..
+            } => {
+                if !missing_volumes.is_empty() {
+                    candidate.platform = Some(iso2god::forge::Platform::PlayStation4);
+                }
+                first_volume
+            }
+            iso2god::forge::archive::ArchiveKind::SingleVolume(archive) => archive,
+            _ => unreachable!(),
         };
         candidate.path = entry_volume.clone();
 
         if let Ok(entries) =
-            iso2god::forge::archive::ArchiveEngine::list_archive_entries(&entry_volume)
+            iso2god::forge::archive::ArchiveEngine::list_archive_entries_with_password(
+                &entry_volume,
+                current_archive_password().as_deref(),
+            )
         {
             for entry in &entries {
                 let entry_lower = entry.to_ascii_lowercase();
@@ -380,6 +393,35 @@ fn inspect_candidate(path: &Path, hint: Option<ContentRole>) -> ScannedCandidate
                     if let Some(tname) = extract_title_name_from_str(entry) {
                         if candidate.title_name.is_none() {
                             candidate.title_name = Some(tname);
+                        }
+                    }
+                    if entry_lower.ends_with("param.sfo") {
+                        if let Ok(bytes) =
+                            iso2god::forge::ArchiveEngine::read_archive_entry_with_password(
+                                &entry_volume,
+                                entry,
+                                current_archive_password().as_deref(),
+                            )
+                        {
+                            candidate.title_id =
+                                iso2god::forge::detector::extract_sfo_string(&bytes, "TITLE_ID")
+                                    .or(candidate.title_id);
+                            candidate.title_name =
+                                iso2god::forge::detector::extract_sfo_string(&bytes, "TITLE")
+                                    .or(candidate.title_name);
+                            candidate.version =
+                                iso2god::forge::detector::extract_sfo_string(&bytes, "APP_VER")
+                                    .or(candidate.version);
+                            match iso2god::forge::detector::extract_sfo_string(&bytes, "CATEGORY")
+                                .as_deref()
+                            {
+                                Some("gd" | "gdc" | "gda") => {
+                                    candidate.role = ContentRole::BaseGame
+                                }
+                                Some("gp") => candidate.role = ContentRole::Update,
+                                Some("ac") => candidate.role = ContentRole::Dlc,
+                                _ => {}
+                            }
                         }
                     }
                     if entry_lower.contains("dlc")
@@ -407,6 +449,11 @@ fn inspect_candidate(path: &Path, hint: Option<ContentRole>) -> ScannedCandidate
         return candidate;
     }
 
+    let ext = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if ext == "pkg" {
         candidate.platform = Some(iso2god::forge::Platform::PlayStation4);
         if let Some(tid) = iso2god::forge::detector::extract_ps4_title_id_from_str(name) {
@@ -5238,6 +5285,14 @@ fn read_ps4_source_metadata_for_update_selection(
         return read_ps4_pkg_metadata(tool, &resolved);
     }
 
+    match iso2god::forge::ArchiveEngine::classify(source) {
+        iso2god::forge::ArchiveKind::SingleVolume(_)
+        | iso2god::forge::ArchiveKind::MultiVolume { .. } => {
+            return read_ps4_archive_metadata_for_update_selection(source, classified, tool);
+        }
+        _ => {}
+    }
+
     let sfo_candidates = [
         resolved.join("sce_sys/param.sfo"),
         resolved.join("Image0/sce_sys/param.sfo"),
@@ -5286,6 +5341,121 @@ fn read_ps4_source_metadata_for_update_selection(
         passcode_status: "not applicable to folder input".to_owned(),
         is_fake: content_id.contains("FPKG") || content_id.contains("FAKE"),
     })
+}
+
+fn read_ps4_archive_metadata_for_update_selection(
+    archive: &Path,
+    classified: &ClassifiedSourceSet,
+    tool: &Path,
+) -> Result<Ps4PkgMetadata, Error> {
+    use iso2god::forge::ArchiveEngine;
+
+    let entries = ArchiveEngine::list_archive_entries_with_password(
+        archive,
+        current_archive_password().as_deref(),
+    )
+    .with_context(|| format!("could not inspect PS4 archive {}", archive.display()))?;
+    let candidates = [
+        "sce_sys/param.sfo",
+        "Image0/sce_sys/param.sfo",
+        "Sc0/param.sfo",
+        "Base/Sc0/param.sfo",
+    ];
+    let entry_matches = |candidate: &str| {
+        entries.iter().find(|entry| {
+            entry
+                .replace('\\', "/")
+                .trim_start_matches("./")
+                .eq_ignore_ascii_case(candidate)
+                || entry
+                    .replace('\\', "/")
+                    .trim_start_matches("./")
+                    .to_ascii_lowercase()
+                    .ends_with(&format!("/{candidate}").to_ascii_lowercase())
+        })
+    };
+
+    let workspace = iso2god::forge::TempWorkspace::new("ps4_archive_metadata")?;
+    let sfo_path = workspace.root.join("param.sfo");
+    if let Some(entry) = candidates
+        .iter()
+        .find_map(|candidate| entry_matches(candidate))
+    {
+        let bytes = ArchiveEngine::read_archive_entry_with_password(
+            archive,
+            entry,
+            current_archive_password().as_deref(),
+        )
+        .with_context(|| format!("could not read PS4 metadata entry {entry}"))?;
+        ensure!(
+            bytes.len() <= 16 * 1024 * 1024,
+            "PS4 param.sfo entry is unexpectedly large ({} bytes)",
+            bytes.len()
+        );
+        fs::write(&sfo_path, bytes)?;
+    } else {
+        // Some users distribute the original PKG inside an archive instead of
+        // an extracted game tree. Extract only that package entry to a managed
+        // temporary file because OrbisPkgTool needs a seekable package path.
+        let mut packages = entries
+            .iter()
+            .filter(|entry| entry.to_ascii_lowercase().ends_with(".pkg"))
+            .collect::<Vec<_>>();
+        ensure!(
+            packages.len() == 1,
+            "PS4 archive has no param.sfo and does not contain exactly one game PKG"
+        );
+        let package_path = workspace.root.join("nested-game.pkg");
+        ArchiveEngine::extract_archive_entry_with_password(
+            archive,
+            packages.remove(0),
+            &package_path,
+            current_archive_password().as_deref(),
+        )
+        .context("could not stage the PS4 PKG stored inside the selected archive")?;
+        let mut metadata = read_ps4_pkg_metadata(tool, &package_path)?;
+        ensure_archive_title_id_matches(&metadata.title_id, classified)?;
+        metadata.path = archive.to_path_buf();
+        return Ok(metadata);
+    }
+
+    let read = |key: &str| iso2god::forge::FormatDetector::read_sfo_key(&sfo_path, key);
+    let title = read("TITLE")
+        .or_else(|| classified.title_name.clone())
+        .unwrap_or_default();
+    let title_id = read("TITLE_ID")
+        .or_else(|| classified.title_id.clone())
+        .context("PS4 archive param.sfo does not contain a detectable Title ID")?;
+    ensure_archive_title_id_matches(&title_id, classified)?;
+    let content_id = read("CONTENT_ID").unwrap_or_default();
+    let version = read("APP_VER")
+        .or_else(|| classified.base_version.clone())
+        .unwrap_or_default();
+    let category = iso2god::forge::FormatDetector::read_sfo_category(&sfo_path).unwrap_or_default();
+    Ok(Ps4PkgMetadata {
+        path: archive.to_path_buf(),
+        title,
+        title_id,
+        content_id: content_id.clone(),
+        version,
+        category,
+        package_type: "PS4 game archive".to_owned(),
+        passcode_status: "not applicable to archive metadata".to_owned(),
+        is_fake: content_id.contains("FPKG") || content_id.contains("FAKE"),
+    })
+}
+
+fn ensure_archive_title_id_matches(
+    title_id: &str,
+    classified: &ClassifiedSourceSet,
+) -> Result<(), Error> {
+    if let Some(classified_id) = classified.title_id.as_deref() {
+        ensure!(
+            title_id.eq_ignore_ascii_case(classified_id),
+            "PS4 archive param.sfo Title ID ({title_id}) disagrees with detected input ({classified_id})"
+        );
+    }
+    Ok(())
 }
 
 fn discover_and_download_ps4_update(
@@ -7443,12 +7613,18 @@ mod manual_import_tests {
     }
 
     fn synthetic_sfo(category: &[u8], version: &[u8]) -> Vec<u8> {
+        synthetic_sfo_for_title(category, version, "CUSA12345")
+    }
+
+    fn synthetic_sfo_for_title(category: &[u8], version: &[u8], title_id: &str) -> Vec<u8> {
+        let content_id = format!("EP0001-{title_id}_00-TESTTITLE00000000\0");
+        let title_id_value = format!("{title_id}\0");
         let entries: Vec<(&str, &[u8])> = vec![
             ("APP_VER", version),
             ("CATEGORY", category),
-            ("CONTENT_ID", b"EP0001-CUSA12345_00-TESTTITLE00000000\0"),
+            ("CONTENT_ID", content_id.as_bytes()),
             ("TITLE", b"Synthetic Game\0"),
-            ("TITLE_ID", b"CUSA12345\0"),
+            ("TITLE_ID", title_id_value.as_bytes()),
         ];
         let mut keys = Vec::new();
         let mut values = Vec::new();
@@ -7482,6 +7658,159 @@ mod manual_import_tests {
         output.extend(keys);
         output.extend(values);
         output
+    }
+
+    #[test]
+    fn cusa05986_multipart_archive_reads_param_sfo_without_full_extraction() {
+        let seven_zip = iso2god::forge::archive::find_7zip_executable()
+            .expect("archive metadata regression requires the managed/system 7-Zip runtime");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".tmp")
+            .join(format!("df_cusa05986_archive_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let input = root.join("archive-input").join("[GM]NFSP[G]");
+        fs::create_dir_all(input.join("sce_sys")).unwrap();
+        fs::write(
+            input.join("sce_sys/param.sfo"),
+            synthetic_sfo_for_title(b"gd", b"01.00", "CUSA05986"),
+        )
+        .unwrap();
+        // Force multiple archive volumes and make the param.sfo entry appear
+        // in a nested folder, matching common game-dump layouts.
+        fs::write(input.join("large-game-data.bin"), vec![0x5a; 128 * 1024]).unwrap();
+        let archive_path = root.join("[GM]NFSP[G].7z");
+        let status = Command::new(seven_zip)
+            .current_dir(&root)
+            .args(["a", "-t7z", "-mx=0", "-v32k"])
+            .arg(&archive_path)
+            .arg("archive-input")
+            .status()
+            .unwrap();
+        assert!(status.success(), "could not create multipart test archive");
+        fs::remove_dir_all(root.join("archive-input")).unwrap();
+        let first = root.join("[GM]NFSP[G].7z.001");
+        let second = root.join("[GM]NFSP[G].7z.002");
+        assert!(first.is_file() && second.is_file(), "archive was not split");
+        let detected = inspect_candidate(&first, Some(ContentRole::BaseGame));
+        assert_eq!(detected.title_id.as_deref(), Some("CUSA05986"));
+        assert_eq!(detected.version.as_deref(), Some("01.00"));
+        let before = fs::read(&first).unwrap();
+        let classified = ClassifiedSourceSet {
+            platform: iso2god::forge::Platform::PlayStation4,
+            title_id: None,
+            title_name: None,
+            base_sources: vec![first.clone()],
+            update_sources: vec![],
+            dlc_sources: vec![],
+            dlc_detected: false,
+            base_version: None,
+            update_version: None,
+            itemzflow: None,
+        };
+        let metadata = read_ps4_source_metadata_for_update_selection(
+            &FolderContentGroup {
+                label: "Base Game",
+                sources: vec![first.clone()],
+                directory: root.clone(),
+                multipart_sets: Vec::new(),
+                ordinary_items: 1,
+            },
+            &classified,
+            Path::new("unused-orbis-tool-for-extracted-sfo"),
+        )
+        .unwrap();
+        assert_eq!(metadata.title_id, "CUSA05986");
+        assert_eq!(metadata.version, "01.00");
+        assert_eq!(metadata.title, "Synthetic Game");
+        assert_eq!(fs::read(&first).unwrap(), before, "source archive changed");
+        assert!(
+            !root.join("archive-input").exists(),
+            "archive was fully extracted"
+        );
+
+        // A later selected volume resolves to the first volume automatically.
+        let later = iso2god::forge::ArchiveEngine::read_archive_entry(
+            &second,
+            "archive-input/[GM]NFSP[G]/sce_sys/param.sfo",
+        )
+        .unwrap();
+        assert_eq!(later, synthetic_sfo_for_title(b"gd", b"01.00", "CUSA05986"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ps4_game_metadata_is_read_from_zip_entries_before_extraction() {
+        let seven_zip = iso2god::forge::archive::find_7zip_executable()
+            .expect("ZIP metadata regression requires the managed/system 7-Zip runtime");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".tmp")
+            .join(format!("df_zip_metadata_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let game = root.join("input/NFS/sce_sys");
+        fs::create_dir_all(&game).unwrap();
+        fs::write(
+            game.join("param.sfo"),
+            synthetic_sfo_for_title(b"gd", b"01.00", "CUSA05986"),
+        )
+        .unwrap();
+        let archive = root.join("game.zip");
+        let status = Command::new(seven_zip)
+            .current_dir(&root)
+            .args(["a", "-tzip", "-mx=0"])
+            .arg(&archive)
+            .arg("input")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::remove_dir_all(root.join("input")).unwrap();
+
+        let detected = inspect_candidate(&archive, Some(ContentRole::BaseGame));
+        assert_eq!(detected.title_id.as_deref(), Some("CUSA05986"));
+        assert_eq!(detected.version.as_deref(), Some("01.00"));
+        assert!(!root.join("input").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ps4_archive_metadata_reports_a_missing_volume_before_lookup() {
+        let seven_zip = iso2god::forge::archive::find_7zip_executable()
+            .expect("missing-volume regression requires the managed/system 7-Zip runtime");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".tmp")
+            .join(format!("df_missing_archive_part_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("input/sce_sys")).unwrap();
+        fs::write(
+            root.join("input/sce_sys/param.sfo"),
+            synthetic_sfo_for_title(b"gd", b"01.00", "CUSA05986"),
+        )
+        .unwrap();
+        fs::write(root.join("input/data.bin"), vec![0x43; 256 * 1024]).unwrap();
+        let status = Command::new(seven_zip)
+            .current_dir(&root)
+            .args(["a", "-t7z", "-mx=0", "-v16k"])
+            .arg("game.7z")
+            .arg("input")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let mut parts = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.to_string_lossy().ends_with(".7z.001")
+                    || path.to_string_lossy().contains(".7z.00")
+            })
+            .collect::<Vec<_>>();
+        parts.sort();
+        assert!(parts.len() > 2);
+        fs::remove_file(&parts[1]).unwrap();
+        let error =
+            iso2god::forge::ArchiveEngine::read_archive_entry(&parts[0], "input/sce_sys/param.sfo")
+                .unwrap_err();
+        assert!(format!("{error:#}").contains("Missing archive parts"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn synthetic_dump(root: &Path, folder: &str, category: &[u8], version: &[u8]) -> PathBuf {

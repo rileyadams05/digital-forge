@@ -106,9 +106,14 @@ impl ArchiveEngine {
             };
         }
 
-        // 2. Multi-volume archive check (.7z.001, .part1.rar, PT1.rar, .zip.001)
-        if name.ends_with(".001") {
-            let prefix = &name[..name.len() - 4];
+        // 2. Multi-volume archive check (.7z.001, .zip.001, including when
+        // the user drops a later numbered volume).
+        if let Some((prefix, suffix)) = name.rsplit_once('.')
+            && suffix.len() == 3
+            && suffix.chars().all(|character| character.is_ascii_digit())
+            && (prefix.to_ascii_lowercase().ends_with(".7z")
+                || prefix.to_ascii_lowercase().ends_with(".zip"))
+        {
             let parent = source.parent().unwrap_or_else(|| Path::new("."));
             let mut all_vols = Vec::new();
             let mut missing = Vec::new();
@@ -204,6 +209,67 @@ impl ArchiveEngine {
             }
         }
 
+        // Legacy RAR volume sets use `game.rar`, `game.r00`, `game.r01`, ... .
+        // Accept a drop on either the initial archive or any `.rNN` volume.
+        let legacy_rar = if lower_name.ends_with(".rar") {
+            Some(source.to_path_buf())
+        } else if let Some((stem, suffix)) = name.rsplit_once('.')
+            && suffix.len() == 3
+            && suffix
+                .get(..1)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("r"))
+            && suffix[1..]
+                .chars()
+                .all(|character| character.is_ascii_digit())
+        {
+            let initial = source
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(format!("{stem}.rar"));
+            initial.is_file().then_some(initial)
+        } else {
+            None
+        };
+        if let Some(initial) = legacy_rar {
+            let parent = initial.parent().unwrap_or_else(|| Path::new("."));
+            let stem = initial
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            let mut volumes = vec![initial.clone()];
+            let mut missing = Vec::new();
+            let mut index = 0u32;
+            loop {
+                let name = format!("{stem}.r{index:02}");
+                let candidate = parent.join(&name);
+                if candidate.is_file() {
+                    volumes.push(candidate);
+                    index += 1;
+                    continue;
+                }
+                let mut later_exists = false;
+                for later in index + 1..100 {
+                    if parent.join(format!("{stem}.r{later:02}")).is_file() {
+                        later_exists = true;
+                        break;
+                    }
+                }
+                if later_exists {
+                    missing.push(name);
+                    index += 1;
+                } else {
+                    break;
+                }
+            }
+            if volumes.len() > 1 || !missing.is_empty() {
+                return ArchiveKind::MultiVolume {
+                    first_volume: initial,
+                    all_volumes: volumes,
+                    missing_volumes: missing,
+                };
+            }
+        }
+
         // 3. Single archive check (.zip, .7z, .rar, .tar, .gz)
         if let Some(ext) = source.extension().and_then(|e| e.to_str()) {
             if ext.eq_ignore_ascii_case("zip")
@@ -220,16 +286,39 @@ impl ArchiveEngine {
     }
 
     pub fn list_archive_entries(archive_path: &Path) -> Result<Vec<String>, Error> {
+        Self::list_archive_entries_with_password(archive_path, None)
+    }
+
+    pub fn list_archive_entries_with_password(
+        archive_path: &Path,
+        password: Option<&str>,
+    ) -> Result<Vec<String>, Error> {
+        let archive = match Self::classify(archive_path) {
+            ArchiveKind::SingleVolume(path) => path,
+            ArchiveKind::MultiVolume {
+                first_volume,
+                missing_volumes,
+                ..
+            } => {
+                if !missing_volumes.is_empty() {
+                    bail!("Missing archive parts: {}", missing_volumes.join(", "));
+                }
+                first_volume
+            }
+            _ => archive_path.to_path_buf(),
+        };
         let tool = find_7zip_executable().context(
             "7-Zip or compatible archive extractor was not found. Please install 7-Zip.",
         )?;
-        let output = Command::new(&tool)
+        let mut command = Command::new(&tool);
+        command
             .arg("l")
             .arg("-ba")
             .arg("-slt")
-            .arg("-p-")
-            .arg(archive_path)
-            .stdin(Stdio::null())
+            .arg(&archive)
+            .stdin(Stdio::null());
+        command.arg(password.map_or_else(|| "-p-".to_owned(), |value| format!("-p{value}")));
+        let output = command
             .output()
             .with_context(|| format!("failed to inspect archive {}", archive_path.display()))?;
         if !output.status.success() {
@@ -246,6 +335,141 @@ impl ArchiveEngine {
             }
         }
         Ok(entries)
+    }
+
+    /// Read one archive member without extracting the rest of the archive.
+    /// The member must already be present in the archive listing; this also
+    /// prevents a caller from using this helper to request an arbitrary path.
+    pub fn read_archive_entry(archive_path: &Path, member: &str) -> Result<Vec<u8>, Error> {
+        Self::read_archive_entry_with_password(archive_path, member, None)
+    }
+
+    pub fn read_archive_entry_with_password(
+        archive_path: &Path,
+        member: &str,
+        password: Option<&str>,
+    ) -> Result<Vec<u8>, Error> {
+        let (entry, missing) = archive_entry_path(archive_path)?;
+        if !missing.is_empty() {
+            bail!("Missing archive parts: {}", missing.join(", "));
+        }
+        let tool = find_7zip_executable().context("7-Zip was not found")?;
+        let listed = Self::list_archive_entries_with_password(&entry, password)?;
+        let normalized_member = member.replace('\\', "/");
+        let actual = listed
+            .iter()
+            .find(|listed| {
+                listed
+                    .replace('\\', "/")
+                    .eq_ignore_ascii_case(&normalized_member)
+            })
+            .context("requested member was not found in archive")?;
+        const MAX_MEMBER_BYTES: u64 = 16 * 1024 * 1024;
+        let mut command = Command::new(&tool);
+        command
+            .arg("x")
+            .arg("-so")
+            .arg("-y")
+            .arg(&entry)
+            .arg(actual)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command.arg(password.map_or_else(|| "-p-".to_owned(), |value| format!("-p{value}")));
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to read {actual} from {}", entry.display()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("archive extractor stdout unavailable")?;
+        let mut bytes = Vec::new();
+        stdout
+            .take(MAX_MEMBER_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .context("could not read selected archive member")?;
+        if bytes.len() as u64 > MAX_MEMBER_BYTES {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("archive member {actual} exceeds the 16 MiB metadata limit");
+        }
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            bail!(
+                "could not read archive member {actual}: {}",
+                concise_7zip_error(&String::from_utf8_lossy(&output.stderr))
+            );
+        }
+        Ok(bytes)
+    }
+
+    /// Stream one selected member to a file. This is used only when a PKG is
+    /// nested in an archive and the package inspector requires a seekable file.
+    pub fn extract_archive_entry(
+        archive_path: &Path,
+        member: &str,
+        destination: &Path,
+    ) -> Result<(), Error> {
+        Self::extract_archive_entry_with_password(archive_path, member, destination, None)
+    }
+
+    pub fn extract_archive_entry_with_password(
+        archive_path: &Path,
+        member: &str,
+        destination: &Path,
+        password: Option<&str>,
+    ) -> Result<(), Error> {
+        let (entry, missing) = archive_entry_path(archive_path)?;
+        if !missing.is_empty() {
+            bail!("Missing archive parts: {}", missing.join(", "));
+        }
+        let tool = find_7zip_executable().context("7-Zip was not found")?;
+        let listed = Self::list_archive_entries_with_password(&entry, password)?;
+        let normalized_member = member.replace('\\', "/");
+        let actual = listed
+            .iter()
+            .find(|listed| {
+                listed
+                    .replace('\\', "/")
+                    .eq_ignore_ascii_case(&normalized_member)
+            })
+            .context("requested member was not found in archive")?;
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut command = Command::new(&tool);
+        command
+            .arg("x")
+            .arg("-so")
+            .arg("-y")
+            .arg(&entry)
+            .arg(actual)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command.arg(password.map_or_else(|| "-p-".to_owned(), |value| format!("-p{value}")));
+        let mut output = command
+            .spawn()
+            .with_context(|| format!("failed to extract {actual} from {}", entry.display()))?;
+        let stdout = output
+            .stdout
+            .take()
+            .context("archive extractor stdout unavailable")?;
+        let mut destination_file = fs::File::create(destination)?;
+        let copy_result = io::copy(&mut stdout.take(u64::MAX), &mut destination_file);
+        let output = output.wait_with_output()?;
+        if let Err(error) = copy_result {
+            let _ = fs::remove_file(destination);
+            return Err(error.into());
+        }
+        if !output.status.success() {
+            let _ = fs::remove_file(destination);
+            bail!(
+                "could not extract archive member {actual}: {}",
+                concise_7zip_error(&String::from_utf8_lossy(&output.stderr))
+            );
+        }
+        Ok(())
     }
 
     /// Inspect encryption metadata without extracting content or waiting on
@@ -324,6 +548,8 @@ impl ArchiveEngine {
         let tool = find_7zip_executable().context(
             "7-Zip or compatible archive extractor was not found. Please install 7-Zip.",
         )?;
+        let members = Self::list_archive_entries_with_password(&entry, password)?;
+        validate_archive_member_paths(&members, &entry)?;
 
         let mut cmd = Command::new(&tool);
         cmd.arg("x")
@@ -473,6 +699,46 @@ impl ArchiveEngine {
     }
 }
 
+fn validate_archive_member_paths(entries: &[String], archive: &Path) -> Result<(), Error> {
+    let archive_name = archive
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let archive_full_path = archive.to_string_lossy().replace('\\', "/");
+    for entry in entries {
+        let normalized = entry.replace('\\', "/");
+        // 7-Zip's technical listing begins with the archive's own path.
+        if normalized.eq_ignore_ascii_case(&archive_full_path)
+            || normalized.eq_ignore_ascii_case(archive_name)
+        {
+            continue;
+        }
+        if normalized.starts_with('/')
+            || normalized.starts_with("//")
+            || normalized.contains(':')
+            || normalized.split('/').any(|part| part == "..")
+        {
+            bail!("archive contains an unsafe path: {entry}");
+        }
+    }
+    Ok(())
+}
+
+fn archive_entry_path(archive_path: &Path) -> Result<(PathBuf, Vec<String>), Error> {
+    match ArchiveEngine::classify(archive_path) {
+        ArchiveKind::SingleVolume(path) => Ok((path, Vec::new())),
+        ArchiveKind::MultiVolume {
+            first_volume,
+            missing_volumes,
+            ..
+        } => Ok((first_volume, missing_volumes)),
+        _ => bail!(
+            "{} is not a supported compressed archive",
+            archive_path.display()
+        ),
+    }
+}
+
 fn render_extraction_progress(percent: u8, item: &str) -> Result<(), Error> {
     const WIDTH: usize = 20;
     let percent = percent.min(100);
@@ -610,7 +876,7 @@ mod tests {
 
     use super::{
         ArchiveEngine, ArchiveKind, TempWorkspace, find_7zip_executable, parse_7zip_progress,
-        remove_temporary_extraction,
+        remove_temporary_extraction, validate_archive_member_paths,
     };
 
     #[test]
@@ -673,6 +939,64 @@ mod tests {
             }
             other => panic!("expected compact PT multipart archive, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn later_7z_volume_resolves_first_and_reports_gaps() {
+        let workspace = TempWorkspace::new("numbered_volume_gaps").unwrap();
+        for suffix in ["001", "003"] {
+            fs::write(workspace.root.join(format!("game.7z.{suffix}")), b"volume").unwrap();
+        }
+        match ArchiveEngine::classify(&workspace.root.join("game.7z.003")) {
+            ArchiveKind::MultiVolume {
+                first_volume,
+                all_volumes,
+                missing_volumes,
+            } => {
+                assert_eq!(first_volume, workspace.root.join("game.7z.001"));
+                assert_eq!(all_volumes.len(), 2);
+                assert_eq!(missing_volumes, vec!["game.7z.002"]);
+            }
+            other => panic!("expected numbered multi-volume archive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_rar_volume_naming_is_resolved_and_gaps_are_reported() {
+        let workspace = TempWorkspace::new("legacy_rar_volumes").unwrap();
+        for name in ["game.rar", "game.r00", "game.r02"] {
+            fs::write(workspace.root.join(name), b"volume").unwrap();
+        }
+        match ArchiveEngine::classify(&workspace.root.join("game.r02")) {
+            ArchiveKind::MultiVolume {
+                first_volume,
+                all_volumes,
+                missing_volumes,
+            } => {
+                assert_eq!(first_volume, workspace.root.join("game.rar"));
+                assert_eq!(all_volumes.len(), 3);
+                assert_eq!(missing_volumes, vec!["game.r01"]);
+            }
+            other => panic!("expected legacy RAR volume set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn full_archive_extraction_rejects_path_traversal_members() {
+        let workspace = TempWorkspace::new("archive_path_validation").unwrap();
+        let error = validate_archive_member_paths(
+            &["../outside.bin".to_owned()],
+            &workspace.root.join("game.zip"),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("unsafe path"));
+        assert!(
+            validate_archive_member_paths(
+                &["game/sce_sys/param.sfo".to_owned()],
+                &workspace.root.join("game.zip")
+            )
+            .is_ok()
+        );
     }
 
     #[test]
