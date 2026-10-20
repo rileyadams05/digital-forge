@@ -816,11 +816,14 @@ fn run_pkgtool(
         let folder = output_dir.join(&folder_name);
         fs::create_dir_all(&folder)?;
 
-        let tool = find_tool(
-            "PKGTOOL",
-            &["OrbisPkgTool", "orbis-pkg-tool", "PkgTool", "pkgtool"],
-        )
-        .context("neither OrbisPkgTool nor PkgTool was found")?;
+        let tool = find_native_orbis_pkg_tool()
+            .or_else(|| {
+                find_tool(
+                    "PKGTOOL",
+                    &["OrbisPkgTool", "orbis-pkg-tool", "PkgTool", "pkgtool"],
+                )
+            })
+            .context("neither OrbisPkgTool nor PkgTool was found")?;
 
         let is_orbis_pkg_tool = tool
             .file_name()
@@ -1815,6 +1818,10 @@ pub fn find_native_orbis_pkg_tool() -> Option<PathBuf> {
     candidates.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../consoles/PlayStation/FPKG/tools/OrbisPkgTool/OrbisPkgTool.exe"),
+    );
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("consoles/PlayStation/FPKG/tools/DigitalForge/OrbisPkgTool.exe"),
     );
     candidates.into_iter().find(|path| path.is_file())
 }

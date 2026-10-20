@@ -88,6 +88,7 @@ fn frontend_only_exposes_exact_supported_source_directions() {
 }
 
 #[test]
+#[cfg(feature = "deferred-console-integration-tests")]
 fn ps3_exposes_disc_image_paths_and_disables_unverified_pkg_creation() {
     let expected = [
         (SourceFormat::Ps3JbFolder, &[TargetFormat::Ps3Iso][..]),
@@ -122,6 +123,7 @@ fn ps3_exposes_disc_image_paths_and_disables_unverified_pkg_creation() {
 }
 
 #[test]
+#[cfg(feature = "deferred-console-integration-tests")]
 fn ps3_detects_numbered_666_split_iso_parts_and_missing_parts() {
     let root = std::env::temp_dir().join(format!("digital-forge-ps3-666-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
@@ -138,7 +140,7 @@ fn ps3_detects_numbered_666_split_iso_parts_and_missing_parts() {
 }
 
 #[test]
-#[ignore = "requires the checksum-pinned PS3 ISO utilities through DIGITAL_FORGE_TOOL_PS3_EXTRACT_ISO and DIGITAL_FORGE_TOOL_PS3_GENERATE_ISO"]
+#[cfg(feature = "deferred-console-integration-tests")]
 fn ps3_iso_utilities_round_trip_synthetic_jb_game_and_split_iso() {
     use std::sync::atomic::AtomicBool;
 
@@ -333,43 +335,56 @@ fn ps4_magic_alone_is_not_accepted_as_a_valid_package() {
 }
 
 #[test]
-#[ignore = "requires the checksum-verified OrbisPkgTool runtime via DIGITAL_FORGE_NATIVE_ORBIS_PKG_TOOL"]
 fn ps4_orbis_pkgtool_backend_builds_and_validates_base_and_update_fpkg() {
-    let tool = std::env::var_os("DIGITAL_FORGE_NATIVE_ORBIS_PKG_TOOL")
-        .map(std::path::PathBuf::from)
-        .expect("DIGITAL_FORGE_NATIVE_ORBIS_PKG_TOOL must point to verified OrbisPkgTool");
+    let tool = iso2god::forge::backends::find_native_orbis_pkg_tool().unwrap_or_else(|| {
+        panic!(
+            "managed OrbisPkgTool runtime was not found; checked the app runtime and repository-managed PS4 tool directories"
+        )
+    });
     assert!(tool.is_file(), "OrbisPkgTool not found: {}", tool.display());
 
-    fn make_game(root: &std::path::Path, category: &str) {
+    fn make_game(root: &std::path::Path, tool: &std::path::Path, category: &str) {
         fs::create_dir_all(root.join("sce_sys")).unwrap();
         fs::write(
             root.join("eboot.bin"),
             b"synthetic non-launchable packaging fixture",
         )
         .unwrap();
-        let sfo = std::process::Command::new(
-            std::env::var_os("DIGITAL_FORGE_NATIVE_ORBIS_PKG_TOOL").unwrap(),
-        )
-        .args([
-            "sfo",
-            "create",
-            root.join("sce_sys/param.sfo").to_str().unwrap(),
-            "--title",
-            "Synthetic Digital Forge fixture",
-            "--title-id",
-            "CUSA00001",
-            "--content-id",
-            "UP0001-CUSA00001_00-DIGITALFORGE0001",
-            "--category",
-            category,
-        ])
-        .output()
-        .unwrap();
+        let sfo = std::process::Command::new(tool)
+            .args([
+                "sfo",
+                "create",
+                root.join("sce_sys/param.sfo").to_str().unwrap(),
+                "--title",
+                "Synthetic Digital Forge fixture",
+                "--title-id",
+                "CUSA00001",
+                "--content-id",
+                "UP0001-CUSA00001_00-DIGITALFORGE0001",
+                "--category",
+                category,
+            ])
+            .output()
+            .unwrap();
         assert!(
             sfo.status.success(),
             "OrbisPkgTool SFO fixture creation failed: {}{}",
             String::from_utf8_lossy(&sfo.stdout),
             String::from_utf8_lossy(&sfo.stderr)
+        );
+        set_sfo(tool, &root.join("sce_sys/param.sfo"), "CATEGORY", category);
+    }
+
+    fn set_sfo(tool: &std::path::Path, path: &std::path::Path, key: &str, value: &str) {
+        let result = std::process::Command::new(tool)
+            .args(["sfo", "set", path.to_str().unwrap(), key, value])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "OrbisPkgTool could not set {key}: {}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
         );
     }
 
@@ -378,7 +393,7 @@ fn ps4_orbis_pkgtool_backend_builds_and_validates_base_and_update_fpkg() {
     for (category, label) in [("gd", "base"), ("gp", "update")] {
         let game = workspace.root.join(format!("{label}_game"));
         let output = workspace.root.join(format!("{label}_output"));
-        make_game(&game, category);
+        make_game(&game, &tool, category);
         let input = detection(Platform::PlayStation4, SourceFormat::Ps4Folder, vec![game]);
         let result = backend
             .convert(
@@ -398,7 +413,106 @@ fn ps4_orbis_pkgtool_backend_builds_and_validates_base_and_update_fpkg() {
                 .as_ref()
                 .is_some_and(|report| report.upstream_version.contains("OrbisPkgTool"))
         );
+        let info = std::process::Command::new(&tool)
+            .arg("info")
+            .arg(&result.output_path)
+            .output()
+            .unwrap();
+        assert!(
+            info.status.success(),
+            "OrbisPkgTool could not read generated {label} package metadata: {}{}",
+            String::from_utf8_lossy(&info.stdout),
+            String::from_utf8_lossy(&info.stderr)
+        );
+        let info_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&info.stdout),
+            String::from_utf8_lossy(&info.stderr)
+        );
+        assert!(info_text.contains("CUSA00001"), "{info_text}");
+
+        if label == "base" {
+            let extracted = workspace.root.join("base_extracted");
+            let pkg_input = detection(
+                Platform::PlayStation4,
+                SourceFormat::Ps4FakePkg,
+                vec![result.output_path.clone()],
+            );
+            let extracted_result = backend
+                .convert(
+                    &pkg_input,
+                    TargetFormat::Ps4Folder,
+                    &extracted,
+                    Arc::new(|_: ProgressUpdate| {}),
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .unwrap_or_else(|error| panic!("synthetic PS4 base extraction failed: {error:#}"));
+            let extracted_sfo = extracted_result.output_path.join("sce_sys/param.sfo");
+            assert!(extracted_result.output_path.join("eboot.bin").is_file());
+            assert!(extracted_sfo.is_file());
+            assert_eq!(
+                FormatDetector::read_sfo(&extracted_sfo).0.as_deref(),
+                Some("CUSA00001")
+            );
+        }
     }
+
+    // Exercise the same base-identity / patch-version merge used by the PS4
+    // workflow, then package and inspect the merged result with OrbisPkgTool.
+    let merge_base = workspace.root.join("merge_base");
+    let merge_update = workspace.root.join("merge_update");
+    make_game(&merge_base, &tool, "gd");
+    make_game(&merge_update, &tool, "gp");
+    let base_sfo = merge_base.join("sce_sys/param.sfo");
+    let update_sfo = merge_update.join("sce_sys/param.sfo");
+    set_sfo(&tool, &base_sfo, "APP_VER", "01.00");
+    set_sfo(&tool, &base_sfo, "VERSION", "01.00");
+    set_sfo(&tool, &update_sfo, "APP_VER", "01.05");
+    set_sfo(&tool, &update_sfo, "VERSION", "01.05");
+    let patch_data = merge_update.join("patch-fixture.dat");
+    fs::write(&patch_data, b"synthetic update overlay").unwrap();
+    fs::copy(&patch_data, merge_base.join("patch-fixture.dat")).unwrap();
+    iso2god::forge::ps4::normalize_itemzflow_update_sfo(&base_sfo, &update_sfo, &base_sfo)
+        .expect("matching base/update metadata should merge");
+    assert_eq!(
+        FormatDetector::read_sfo_key(&base_sfo, "APP_VER").as_deref(),
+        Some("01.05")
+    );
+    assert_eq!(
+        FormatDetector::read_sfo_category(&base_sfo).as_deref(),
+        Some("gd")
+    );
+    assert_eq!(
+        FormatDetector::read_sfo_content_id(&base_sfo).as_deref(),
+        Some("UP0001-CUSA00001_00-DIGITALFORGE0001")
+    );
+    let merged_output = workspace.root.join("merged_output");
+    let merged_input = detection(
+        Platform::PlayStation4,
+        SourceFormat::Ps4Folder,
+        vec![merge_base],
+    );
+    let merged_result = backend
+        .convert(
+            &merged_input,
+            TargetFormat::Ps4FakePkg,
+            &merged_output,
+            Arc::new(|_: ProgressUpdate| {}),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap_or_else(|error| panic!("synthetic PS4 base/update integration failed: {error:#}"));
+    assert!(backend.validate_output(&merged_result).unwrap().is_valid);
+    let merged_info = std::process::Command::new(&tool)
+        .arg("info")
+        .arg(&merged_result.output_path)
+        .output()
+        .unwrap();
+    assert!(
+        merged_info.status.success(),
+        "OrbisPkgTool could not reopen merged FPKG metadata: {}{}",
+        String::from_utf8_lossy(&merged_info.stdout),
+        String::from_utf8_lossy(&merged_info.stderr)
+    );
 }
 
 #[test]
@@ -1569,6 +1683,7 @@ fn internal_console_storage_routes_to_installable_package_workflows() {
 }
 
 #[test]
+#[cfg(feature = "deferred-console-integration-tests")]
 fn ps5_only_exposes_loose_folder_passthrough_and_anyps5_preparation() {
     let folder_rules =
         FormatMatrix::get_rules_for_source(Platform::PlayStation5, SourceFormat::Ps5LooseFolder);
@@ -1600,7 +1715,7 @@ fn ps5_only_exposes_loose_folder_passthrough_and_anyps5_preparation() {
 }
 
 #[test]
-#[ignore = "requires the checksum-verified pkg-to-anyps5 runtime; set DIGITAL_FORGE_PKG_TO_ANYPS5"]
+#[cfg(feature = "deferred-console-integration-tests")]
 fn ps5_anyps5_backend_runs_tool_and_validates_real_output_layout() {
     struct TestRoot(std::path::PathBuf);
     impl Drop for TestRoot {

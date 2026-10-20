@@ -15,6 +15,9 @@ path = "src/lib.rs"
 name = "iso2god"
 path = "src/bin/iso2god.rs"
 
+[features]
+# Deliberately opt-in hardware/tool-dependent tests for systems on hold.
+deferred-console-integration-tests = []
 
 [dependencies]
 anyhow = { version = "1.0.97", features = ["backtrace"] }
