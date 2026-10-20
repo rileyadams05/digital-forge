@@ -13,14 +13,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_actions_and_credentials_on_transfer_jobs() {
+    fn rejects_unsupported_actions_and_unrecognized_request_fields() {
         assert!(serde_json::from_value::<Request>(json!({"action": "run_shell"})).is_err());
-        let request: Request =
-            serde_json::from_value(json!({"action":"check_updates","password":"secret"})).unwrap();
-        assert!(validate(&request).is_err());
         assert!(
             serde_json::from_value::<Request>(json!({"action":"check_updates","unexpected":true}))
                 .is_err()
+        );
+        assert!(
+            serde_json::from_value::<Request>(
+                json!({"action":"check_updates","password":"secret"})
+            )
+            .is_err()
         );
     }
 
@@ -95,8 +98,6 @@ use std::sync::OnceLock;
 enum Action {
     ProcessGames,
     VerifyGame,
-    ConfigureFtp,
-    TestFtp,
     InstallArchiveTool,
     CheckUpdates,
     InstallUpdate,
@@ -108,7 +109,6 @@ enum Destination {
     #[default]
     Local,
     Usb,
-    Ftp,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -122,16 +122,11 @@ struct Request {
     destination_path: Option<PathBuf>,
     #[serde(default)]
     remove_archive_parts: bool,
-    host: Option<String>,
-    username: Option<String>,
-    port: Option<u16>,
-    password: Option<String>,
 }
 
 struct Job {
     child: Child,
     directory: PathBuf,
-    secret: Option<String>,
 }
 
 static JOBS: OnceLock<Mutex<BTreeMap<String, Job>>> = OnceLock::new();
@@ -146,20 +141,16 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "start_job",
-            "description": "Run an explicitly user-authorized app operation in a background worker without terminal prompts. Returns a job ID, not completion. One job at a time per bridge. Poll job_status. process_games handles explicit ISO/archive/multipart/prepared-folder sources sequentially; source parts are preserved unless remove_archive_parts is true and delivery succeeds. local and usb require destination_path. configure_ftp requires host and password, tests then saves credentials. verify_game checks prepared folders structurally, not gameplay. check_updates does not install; install_update requires explicit update approval.",
+            "description": "Run an explicitly user-authorized app operation in a background worker without terminal prompts. Returns a job ID, not completion. One job at a time per bridge. Poll job_status. process_games handles explicit ISO/archive/multipart/prepared-folder sources sequentially; source parts are preserved unless remove_archive_parts is true and delivery succeeds. local and usb require destination_path. verify_game checks prepared folders structurally, not gameplay. check_updates does not install; install_update requires explicit update approval.",
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                    "action": {"type": "string", "enum": ["process_games", "verify_game", "configure_ftp", "test_ftp", "install_archive_tool", "check_updates", "install_update"]},
+                    "action": {"type": "string", "enum": ["process_games", "verify_game", "install_archive_tool", "check_updates", "install_update"]},
                     "sources": {"type": "array", "items": {"type": "string"}, "description": "Explicit user-approved inputs; a folder with multiple archive sets must be split into individual Part 1 inputs."},
-                    "destination": {"type": "string", "enum": ["local", "usb", "ftp"], "default": "local"},
-                    "destination_path": {"type": "string", "description": "Local output root or an exact root returned by list_usb_drives. Not used for FTP."},
+                    "destination": {"type": "string", "enum": ["local", "usb"], "default": "local"},
+                    "destination_path": {"type": "string", "description": "Local output root or an exact root returned by list_usb_drives."},
                     "remove_archive_parts": {"type": "boolean", "default": false, "description": "Only true when the user explicitly requests permanent deletion of successfully delivered multipart source volumes."},
-                    "host": {"type": "string"},
-                    "username": {"type": "string", "default": "xbox"},
-                    "port": {"type": "integer", "minimum": 1, "maximum": 65535, "default": 21},
-                    "password": {"type": "string", "description": "For configure_ftp only; sent to worker over stdin, never stored in job request files or returned."}
                 },
                 "required": ["action"]
             },
@@ -191,16 +182,6 @@ pub(super) fn call_tool(name: &str, arguments: &Value) -> Result<Value, Error> {
 }
 
 fn validate(request: &Request) -> Result<(), Error> {
-    if request.action != Action::ConfigureFtp
-        && (request.password.is_some()
-            || request.host.is_some()
-            || request.username.is_some()
-            || request.port.is_some())
-    {
-        anyhow::bail!(
-            "FTP credentials belong only to configure_ftp; other jobs use saved settings"
-        );
-    }
     match request.action {
         Action::ProcessGames | Action::VerifyGame => {
             if request.sources.is_empty() {
@@ -216,9 +197,6 @@ fn validate(request: &Request) -> Result<(), Error> {
             }
             if request.action == Action::ProcessGames {
                 match request.destination {
-                    Destination::Ftp if request.destination_path.is_some() => anyhow::bail!(
-                        "FTP destination is selected automatically; omit destination_path"
-                    ),
                     Destination::Local | Destination::Usb => {
                         let path = request
                             .destination_path
@@ -239,28 +217,7 @@ fn validate(request: &Request) -> Result<(), Error> {
                             }
                         }
                     }
-                    Destination::Ftp => {}
                 }
-            }
-        }
-        Action::ConfigureFtp => {
-            normalise_ftp_host(request.host.as_deref().context("host is required")?)?;
-            if request.password.as_deref().is_none_or(str::is_empty) {
-                anyhow::bail!("password is required");
-            }
-            let username = request.username.as_deref().unwrap_or(DEFAULT_FTP_USERNAME);
-            if username.trim().is_empty() || username.contains(['\r', '\n']) {
-                anyhow::bail!("invalid FTP username");
-            }
-            if request
-                .password
-                .as_deref()
-                .is_some_and(|s| s.contains(['\r', '\n']))
-            {
-                anyhow::bail!("password must not contain a line break");
-            }
-            if request.port == Some(0) {
-                anyhow::bail!("port must be from 1 to 65535");
             }
         }
         _ => {}
@@ -326,7 +283,6 @@ fn start_job(request: Request) -> Result<Value, Error> {
         Job {
             child,
             directory: directory.clone(),
-            secret: request.password,
         },
     );
     Ok(
@@ -349,9 +305,6 @@ fn job_status(id: &str) -> Result<Value, Error> {
     let mut bytes = Vec::new();
     log.take(16 * 1024).read_to_end(&mut bytes)?;
     let mut tail = String::from_utf8_lossy(&bytes).into_owned();
-    if let Some(secret) = job.secret.as_ref().filter(|s| !s.is_empty()) {
-        tail = tail.replace(secret, "[REDACTED]");
-    }
     let result = if exit.is_some() {
         fs::read(job.directory.join("result.json"))
             .ok()
@@ -389,11 +342,6 @@ pub(super) fn run_worker(result_path: &Path) -> i32 {
         Ok(value) => json!({"success": true, "output": value}),
         Err(error) => {
             let mut message = format!("{error:#}");
-            if let Ok(request) = &request
-                && let Some(secret) = request.password.as_ref().filter(|s| !s.is_empty())
-            {
-                message = message.replace(secret, "[REDACTED]");
-            }
             json!({"success": false, "error": message})
         }
     };
@@ -410,19 +358,9 @@ pub(super) fn run_worker(result_path: &Path) -> i32 {
     if succeeded { 0 } else { 1 }
 }
 
-fn saved_ftp() -> Result<FtpSettings, Error> {
-    let mut settings =
-        load_ftp_settings()?.context("FTP is not configured; use configure_ftp first")?;
-    settings.password = load_saved_password()?.context("saved FTP password is unavailable")?;
-    Ok(settings)
-}
-
 fn execute(request: &Request) -> Result<Value, Error> {
     // A filesystem lock also prevents two different AI clients from mutating the app concurrently.
-    let lock_dir = ftp_settings_path()?
-        .parent()
-        .context("settings directory unavailable")?
-        .to_path_buf();
+    let lock_dir = app_settings::config_dir()?;
     fs::create_dir_all(&lock_dir)?;
     let lock = fs::OpenOptions::new()
         .create(true)
@@ -434,9 +372,6 @@ fn execute(request: &Request) -> Result<Value, Error> {
         .context("another automation worker is active; retry after it finishes")?;
     match request.action {
         Action::ProcessGames => {
-            if request.destination == Destination::Ftp {
-                RcloneFtp::new(&saved_ftp()?)?.connect_available()?;
-            }
             let mut completed = Vec::new();
             for source in &request.sources {
                 println!("Preparing {}", source.display());
@@ -461,34 +396,6 @@ fn execute(request: &Request) -> Result<Value, Error> {
             Ok(
                 json!({"games": verified, "verification": "structure and required files; not gameplay"}),
             )
-        }
-        Action::ConfigureFtp => {
-            let settings = FtpSettings {
-                host: normalise_ftp_host(request.host.as_deref().context("host required")?)?,
-                username: request
-                    .username
-                    .as_deref()
-                    .unwrap_or(DEFAULT_FTP_USERNAME)
-                    .trim()
-                    .to_owned(),
-                port: request.port.unwrap_or(DEFAULT_FTP_PORT),
-                background_port: Some(DEFAULT_BACKGROUND_FTP_PORT),
-                password: request.password.clone().context("password required")?,
-                destination_path: DEFAULT_FTP_DESTINATION.to_owned(),
-            };
-            RcloneFtp::new(&settings)?.connect_available()?;
-            save_password(&settings.username, &settings.password)?;
-            save_ftp_settings(&settings)?;
-            Ok(json!({
-                "configured": true,
-                "connectionTested": true,
-                "xboxPluginInstalled": false,
-                "restartRequired": false
-            }))
-        }
-        Action::TestFtp => {
-            RcloneFtp::new(&saved_ftp()?)?.connect_available()?;
-            Ok(json!({"connected": true}))
         }
         Action::InstallArchiveTool => {
             if let Some(path) = find_7zip() {
@@ -594,10 +501,7 @@ fn process_game(request: &Request, source: &Path) -> Result<Value, Error> {
             game_title: None,
             trim: None,
             num_threads: 1,
-            upload_ftp: false,
             copy_usb: false,
-            use_saved_ftp: false,
-            prompt_delivery: false,
             selected_usb_drive: None,
         })?;
         verify_converted_game(&output)?;
@@ -672,10 +576,6 @@ fn process_game(request: &Request, source: &Path) -> Result<Value, Error> {
             let drive = usb.as_ref().context("USB drive unavailable")?;
             copy_prepared_game_to_selected_drive(&prepared, drive)?;
             portable_path_text(&drive.root.join(&relative))
-        }
-        Destination::Ftp => {
-            upload_prepared_game_to_xbox(&prepared)?;
-            format!("/Hdd1/{}", relative.to_string_lossy().replace('\\', "/"))
         }
     };
     // Background jobs delete only explicitly requested source volumes, after delivery verifies.

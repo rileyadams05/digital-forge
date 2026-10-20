@@ -23,16 +23,15 @@ const PS4_FPKG_PASSCODE: &str = "00000000000000000000000000000000";
 use super::{
     Cli, ConversionOutput, ManualDestinationAction, MenuOption, MultipartDestination,
     MultipartGameSet, PreparedGame, PreparedGameKind, RawModeGuard, TerminalDelivery,
-    configure_ftp_terminal, copy_directory_and_verify, copy_prepared_game_to_folder,
-    copy_prepared_game_to_selected_drive, copy_to_removable_drive, current_archive_password,
-    find_7zip, find_default_xex_game, find_existing_god_package, multipart_game_import_once,
-    multipart_sets_for_dropped_input, open_folder_in_file_explorer, open_url_in_default_browser,
-    pause_to_continue, print_terminal_error, prompt_dropped_game_file, prompt_dropped_path,
+    copy_directory_and_verify, copy_prepared_game_to_folder, copy_prepared_game_to_selected_drive,
+    copy_to_removable_drive, current_archive_password, find_7zip, find_default_xex_game,
+    find_existing_god_package, multipart_game_import_once, multipart_sets_for_dropped_input,
+    open_folder_in_file_explorer, open_url_in_default_browser, pause_to_continue,
+    print_terminal_error, prompt_dropped_game_file, prompt_dropped_path,
     prompt_optional_dropped_path, prompt_terminal_text, prompt_yes_no_key,
     read_prepared_jtag_title_id, render_progress_screen, render_terminal_header, run,
-    run_multipart_game_import, run_terminal_conversion, saved_ftp_is_ready,
-    scan_archive_sets_in_directory, select_menu, select_removable_drive, set_archive_password,
-    test_archive_password, upload_prepared_game_to_xbox, upload_to_saved_xbox,
+    run_multipart_game_import, run_terminal_conversion, scan_archive_sets_in_directory,
+    select_menu, select_removable_drive, set_archive_password, test_archive_password,
     verify_converted_game,
 };
 use crate::app_log::OperationLog;
@@ -1119,9 +1118,6 @@ fn offer_successful_test_log(game_id: Option<&str>, log: &OperationLog) -> Resul
 }
 
 fn wait_for_status_acknowledgement() -> Result<(), Error> {
-    if env::var_os("ISO2GOD_QUEUE_JOB").is_some() {
-        return Ok(());
-    }
     print!("Press Enter to continue to the optional community prompt...");
     io::stdout().flush().context("error writing prompt")?;
     let mut input = String::new();
@@ -1820,74 +1816,6 @@ fn select_manual_import_platform() -> Result<Option<iso2god::forge::Platform>, E
     }
 }
 
-pub(super) fn select_ftp_platform() -> Result<Option<iso2god::forge::Platform>, Error> {
-    use iso2god::forge::{MANUAL_IMPORT_RESULT_LIMIT, ManualImportMenuState, PLATFORM_CATALOG};
-
-    let mut menu = ManualImportMenuState::default();
-    loop {
-        render_terminal_header()?;
-        println!("FTP");
-        println!("========================================================");
-        let visible_query = render_platform_search_field(menu.query());
-        println!("Press ESC to return to the previous page.\n");
-
-        let matches = ftp_matching_indices(&menu);
-        for index in matches.iter().take(MANUAL_IMPORT_RESULT_LIMIT) {
-            println!("    {}", PLATFORM_CATALOG[*index].display_name);
-        }
-
-        let exact_incompatible = (menu.matching_indices().len() == 1)
-            .then(|| &PLATFORM_CATALOG[menu.matching_indices()[0]])
-            .filter(|profile| !profile.platform.supports_ftp_configuration());
-        if let Some(profile) = exact_incompatible {
-            println!("  {} is not FTP compatible.", profile.display_name);
-        } else if !menu.query().is_empty() && matches.is_empty() {
-            println!("  No matching FTP-compatible console.");
-        }
-        io::stdout().flush()?;
-
-        if env::var_os("ISO2GOD_TERMINAL_SMOKE_TEST").as_deref() == Some(OsStr::new("1")) {
-            return Ok(None);
-        }
-
-        let _raw_mode = RawModeGuard::enter()?;
-        let _mouse_capture = ManualImportMouseCaptureGuard::enter()?;
-        let cursor_column = 2 + visible_query.chars().count() as u16;
-        execute!(io::stdout(), EnableBlinking, Show, MoveTo(cursor_column, 9))
-            .context("could not focus the FTP console search field")?;
-        loop {
-            match read().context("could not read FTP console search input")? {
-                Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(platform) = ftp_clicked_platform(&matches, mouse.column, mouse.row)
-                    {
-                        return Ok(Some(platform));
-                    }
-                }
-                Event::Key(key)
-                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
-                {
-                    match manual_import_key_action(key.code) {
-                        Some(ManualImportKeyAction::Character(character)) => {
-                            menu.push(character);
-                            break;
-                        }
-                        Some(ManualImportKeyAction::Backspace) => {
-                            menu.backspace();
-                            break;
-                        }
-                        Some(ManualImportKeyAction::Select) if matches.len() == 1 => {
-                            return Ok(Some(PLATFORM_CATALOG[matches[0]].platform));
-                        }
-                        Some(ManualImportKeyAction::Back) => return Ok(None),
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
 const MANUAL_IMPORT_SEARCH_WIDTH: usize = 48;
 const MANUAL_IMPORT_FIRST_RESULT_ROW: u16 = 14;
 
@@ -1923,35 +1851,6 @@ fn manual_import_clicked_profile(
     let label_start = 4;
     let label_end = label_start + profile.display_name.chars().count() as u16;
     (column >= label_start && column < label_end).then_some(profile)
-}
-
-fn ftp_matching_indices(menu: &iso2god::forge::ManualImportMenuState) -> Vec<usize> {
-    menu.matching_indices()
-        .iter()
-        .copied()
-        .filter(|index| {
-            iso2god::forge::PLATFORM_CATALOG[*index]
-                .platform
-                .supports_ftp_configuration()
-        })
-        .collect()
-}
-
-fn ftp_clicked_platform(
-    indices: &[usize],
-    column: u16,
-    row: u16,
-) -> Option<iso2god::forge::Platform> {
-    let visible_index = row.checked_sub(MANUAL_IMPORT_FIRST_RESULT_ROW)? as usize;
-    if visible_index >= iso2god::forge::MANUAL_IMPORT_RESULT_LIMIT {
-        return None;
-    }
-    let profile = indices
-        .get(visible_index)
-        .map(|index| &iso2god::forge::PLATFORM_CATALOG[*index])?;
-    let label_start = 4;
-    let label_end = label_start + profile.display_name.chars().count() as u16;
-    (column >= label_start && column < label_end).then_some(profile.platform)
 }
 
 fn render_platform_search_field(query: &str) -> String {
@@ -6389,36 +6288,15 @@ fn draw_multiline_menu<T>(
 }
 
 fn run_store_item(listing: &StoreListing, log: &mut OperationLog) -> Result<bool, Error> {
-    if !ensure_ftp_ready()? {
-        return Ok(false);
-    }
     let listing = inspect_listing(listing)?;
     let Some(option) = choose_download_option(&listing)? else {
         return Ok(false);
     };
-    let actions = [
-        MenuOption {
-            value: true,
-            label: "1. Download and install now".to_owned(),
-        },
-        MenuOption {
-            value: false,
-            label: "2. Add to Downloads queue".to_owned(),
-        },
-    ];
-    println!("\nChoose what to do:\n");
-    let Some(start_now) = select_menu(&actions)? else {
+    let Some(delivery) = choose_job_delivery()? else {
         return Ok(false);
     };
-    if !start_now {
-        let drive = super::choose_saved_xbox_storage_name()?;
-        crate::download_queue::enqueue(listing.clone(), option, drive)?;
-        println!("\nAdded to Downloads. It will continue in the background.");
-        pause_to_continue()?;
-        return Ok(false);
-    }
     log.stage("store_item", &listing.title)?;
-    process_store_listing(&listing, JobDelivery::Ftp, option, log)?;
+    process_store_listing(&listing, delivery, option, log)?;
     Ok(true)
 }
 
@@ -6434,34 +6312,18 @@ fn choose_job_delivery() -> Result<Option<JobDelivery>, Error> {
     println!("\nChoose delivery method:\n");
     let options = [
         MenuOption {
-            value: JobDelivery::Ftp,
-            label: "1. Upload to Xbox using FTP".to_owned(),
-        },
-        MenuOption {
             value: JobDelivery::Usb,
-            label: "2. Save to USB drive".to_owned(),
+            label: "1. Save to USB drive".to_owned(),
         },
         MenuOption {
             value: JobDelivery::Local,
-            label: "3. Save to a folder on this PC".to_owned(),
+            label: "2. Save to a folder on this PC".to_owned(),
         },
     ];
     let Some(delivery) = select_menu(&options)? else {
         return Ok(None);
     };
-    if delivery == JobDelivery::Ftp && !ensure_ftp_ready()? {
-        return Ok(None);
-    }
     Ok(Some(delivery))
-}
-
-fn ensure_ftp_ready() -> Result<bool, Error> {
-    if saved_ftp_is_ready()? {
-        return Ok(true);
-    }
-    render_terminal_header()?;
-    println!("Xbox FTP has not been configured.\n");
-    configure_ftp_terminal()
 }
 
 fn choose_download_option(listing: &StoreListing) -> Result<Option<DownloadOption>, Error> {
@@ -6525,7 +6387,6 @@ pub(super) fn process_store_listing(
     set_archive_password(password.as_deref());
     let result = run_terminal_conversion(
         match delivery {
-            JobDelivery::Ftp => TerminalDelivery::Ftp,
             JobDelivery::Usb => TerminalDelivery::Usb,
             JobDelivery::Local => TerminalDelivery::Local,
         },
@@ -7061,14 +6922,9 @@ fn process_source_inner(
                     }
                     Some(2) => {
                         render_terminal_header()?;
-                        match configure_ftp_terminal() {
-                            Ok(true) => pause_to_continue()?,
-                            Ok(false) => {}
-                            Err(error) => {
-                                print_terminal_error(&error);
-                                pause_to_continue()?;
-                            }
-                        }
+                        println!(
+                            "Transfer destination changes are not available for this job. Choose another file or retry."
+                        );
                     }
                     Some(3) => {
                         if let Some(path) = prompt_dropped_game_file()? {
@@ -7180,10 +7036,7 @@ fn convert_iso_source(
         game_title: Some(job.game_name.clone()),
         trim: None,
         num_threads: 1,
-        upload_ftp: false,
         copy_usb: false,
-        use_saved_ftp: false,
-        prompt_delivery: false,
         selected_usb_drive: None,
     })?;
     job.pipeline
@@ -7201,7 +7054,6 @@ fn convert_iso_source(
 
 fn job_destination(delivery: JobDelivery) -> Result<MultipartDestination, Error> {
     Ok(match delivery {
-        JobDelivery::Ftp => MultipartDestination::Ftp,
         JobDelivery::Usb => {
             render_terminal_header()?;
             println!("Searching for removable USB drives...\n");
@@ -7224,7 +7076,6 @@ fn deliver_converted_output(
         .set(StageKind::Delivery, StageStatus::InProgress);
     print_pipeline(job);
     match delivery {
-        JobDelivery::Ftp => upload_to_saved_xbox(output).map_err(map_ftp_error)?,
         JobDelivery::Usb => copy_to_removable_drive(output, None)?,
         JobDelivery::Local => {
             let folder = prompt_local_folder()?.context("folder selection was cancelled")?;
@@ -7245,7 +7096,6 @@ fn deliver_prepared_job(job: &JobState) -> Result<(), Error> {
         .context("the converted package is no longer available")?;
     let prepared = prepared_game_from_root(root)?;
     match job.delivery {
-        JobDelivery::Ftp => upload_prepared_game_to_xbox(&prepared).map_err(map_ftp_error)?,
         JobDelivery::Usb => {
             let drive = select_removable_drive()?.context("USB transfer was cancelled")?;
             copy_prepared_game_to_selected_drive(&prepared, &drive)?;
@@ -7427,19 +7277,6 @@ fn validate_source_password(source: &Path, password: &str) -> Result<(), Error> 
             }
         },
         Err(error) => Err(error),
-    }
-}
-
-fn map_ftp_error(error: Error) -> Error {
-    let text = format!("{error:#}").to_ascii_lowercase();
-    if text.contains("connection refused") {
-        anyhow::anyhow!("Xbox FTP connection was refused")
-    } else if text.contains("unavailable") || text.contains("not found") {
-        anyhow::anyhow!("Xbox destination directory is unavailable")
-    } else if text.contains("interrupt") || text.contains("broken") {
-        anyhow::anyhow!("Upload was interrupted")
-    } else {
-        error
     }
 }
 
@@ -7989,55 +7826,6 @@ mod manual_import_tests {
         assert!(format!("{error:#}").contains("UPDATE ERROR"));
         assert!(format!("{error:#}").contains("update.part2.rar"));
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn ftp_search_returns_every_catalog_console_with_a_real_ftp_backend() {
-        let mut menu = iso2god::forge::ManualImportMenuState::new();
-        let expected = iso2god::forge::PLATFORM_CATALOG
-            .iter()
-            .filter(|profile| profile.platform.supports_ftp_configuration())
-            .map(|profile| profile.platform)
-            .collect::<Vec<_>>();
-        assert_eq!(expected.len(), 13);
-        for platform in &expected {
-            menu.set_query(platform.display_name());
-            let actual = ftp_matching_indices(&menu)
-                .iter()
-                .map(|index| iso2god::forge::PLATFORM_CATALOG[*index].platform)
-                .collect::<Vec<_>>();
-            assert!(
-                actual.contains(platform),
-                "{} should be reachable by its catalog name",
-                platform.display_name()
-            );
-        }
-
-        for query in [
-            "PS2",
-            "PS3",
-            "PS4",
-            "PS5",
-            "PSP",
-            "PS Vita",
-            "Original Xbox",
-            "Xbox 360",
-            "Nintendo DS",
-            "Nintendo DSi",
-            "Nintendo 3DS",
-            "Wii",
-            "Wii U",
-        ] {
-            menu.set_query(query);
-            assert!(
-                !ftp_matching_indices(&menu).is_empty(),
-                "{query} should be available in the FTP search"
-            );
-        }
-
-        menu.set_query("PS1");
-        assert_eq!(menu.matching_indices().len(), 1);
-        assert!(ftp_matching_indices(&menu).is_empty());
     }
 
     #[test]

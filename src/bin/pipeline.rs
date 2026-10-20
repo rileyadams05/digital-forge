@@ -142,7 +142,6 @@ pub enum JobWorkflow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobDelivery {
-    Ftp,
     Usb,
     Local,
 }
@@ -178,7 +177,6 @@ impl JobState {
 
     pub fn delivery_label(&self) -> &'static str {
         match self.delivery {
-            JobDelivery::Ftp => "Xbox FTP upload",
             JobDelivery::Usb => "USB export",
             JobDelivery::Local => "Save to folder",
         }
@@ -283,13 +281,13 @@ mod tests {
         pipeline.iso_detected = StageStatus::Complete;
         pipeline.converting = StageStatus::InProgress;
         pipeline.converting_percent = 62;
-        let rendered = pipeline.render("Xbox FTP upload");
+        let rendered = pipeline.render("USB export");
         assert!(rendered.contains("Downloading       Complete"));
         assert!(rendered.contains("Archive check     Complete"));
         assert!(rendered.contains("Extracting        Complete"));
         assert!(rendered.contains("Game format       Complete"));
         assert!(rendered.contains("Converting        62%"));
         assert!(rendered.contains("Verification      Waiting"));
-        assert!(rendered.contains("Xbox FTP upload   Waiting"));
+        assert!(rendered.contains("USB export        Waiting"));
     }
 }

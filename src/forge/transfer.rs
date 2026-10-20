@@ -15,22 +15,12 @@ use super::backend::{ConversionResult, ProgressUpdate};
 use super::{Platform, TargetFormat};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FtpConfig {
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub password: Option<String>,
-    pub remote_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TransferDestination {
     LocalFolder(PathBuf),
     RemovableDrive {
         drive_letter: String,
         target_root: PathBuf,
     },
-    Ftp(FtpConfig),
 }
 
 pub struct TransferManager;
@@ -182,9 +172,6 @@ impl TransferManager {
                     "External-drive copy verified. Use Windows 'Eject' before disconnecting the drive."
                 );
                 Ok(delivered)
-            }
-            TransferDestination::Ftp(ftp_config) => {
-                Self::transfer_ftp(result, ftp_config, progress, cancelled)
             }
         }
     }
@@ -351,121 +338,6 @@ impl TransferManager {
         });
 
         Ok(destination)
-    }
-
-    pub fn transfer_ftp(
-        result: &ConversionResult,
-        ftp: &FtpConfig,
-        progress: Arc<dyn Fn(ProgressUpdate) + Send + Sync>,
-        cancelled: Arc<AtomicBool>,
-    ) -> Result<PathBuf, Error> {
-        let item_name = resolve_item_name(result);
-        let remote_base = format!("{}/{}", ftp.remote_path.trim_end_matches('/'), item_name);
-
-        let total_bytes = result.total_size.max(1);
-        progress(ProgressUpdate {
-            stage: "Preparing FTP transfer to console".to_string(),
-            percent: 5,
-            details: Some(format!("ftp://{}:{}{}", ftp.host, ftp.port, remote_base)),
-            bytes_processed: 0,
-            total_bytes,
-        });
-
-        let mut upload_items: Vec<(PathBuf, String, u64)> = Vec::new();
-
-        if result.output_path.is_file() {
-            let size = fs::metadata(&result.output_path)?.len();
-            let remote_file_url = format_ftp_url(&ftp.host, ftp.port, &remote_base);
-            upload_items.push((result.output_path.clone(), remote_file_url, size));
-        } else if result.output_path.is_dir() {
-            for entry in walkdir_recursive(&result.output_path)? {
-                let size = fs::metadata(&entry)?.len();
-                let rel = entry.strip_prefix(&result.output_path)?;
-                let rel_str = rel.to_string_lossy().replace('\\', "/");
-                let remote_file_path = format!("{}/{}", remote_base.trim_end_matches('/'), rel_str);
-                let remote_file_url = format_ftp_url(&ftp.host, ftp.port, &remote_file_path);
-                upload_items.push((entry, remote_file_url, size));
-            }
-        }
-
-        for aux in &result.aux_files {
-            if let Some(aux_name) = aux.file_name() {
-                let aux_name_str = aux_name.to_string_lossy();
-                let aux_remote_base =
-                    format!("{}/{}", ftp.remote_path.trim_end_matches('/'), aux_name_str);
-                if aux.is_file() {
-                    let size = fs::metadata(aux)?.len();
-                    let remote_file_url = format_ftp_url(&ftp.host, ftp.port, &aux_remote_base);
-                    upload_items.push((aux.clone(), remote_file_url, size));
-                } else if aux.is_dir() {
-                    for entry in walkdir_recursive(aux)? {
-                        let size = fs::metadata(&entry)?.len();
-                        let rel = entry.strip_prefix(aux)?;
-                        let rel_str = rel.to_string_lossy().replace('\\', "/");
-                        let remote_file_path =
-                            format!("{}/{}", aux_remote_base.trim_end_matches('/'), rel_str);
-                        let remote_file_url =
-                            format_ftp_url(&ftp.host, ftp.port, &remote_file_path);
-                        upload_items.push((entry, remote_file_url, size));
-                    }
-                }
-            }
-        }
-
-        let mut uploaded_bytes = 0u64;
-        let auth = match &ftp.password {
-            Some(p) if !p.is_empty() => format!("{}:{}", ftp.username, p),
-            _ => ftp.username.clone(),
-        };
-
-        for (local_file, remote_url, size) in upload_items {
-            if cancelled.load(Ordering::Relaxed) {
-                bail!("FTP transfer cancelled");
-            }
-
-            let file_name = local_file.file_name().unwrap_or_default().to_string_lossy();
-            let pct = (uploaded_bytes * 100 / total_bytes).min(99) as u8;
-            progress(ProgressUpdate {
-                stage: "Uploading to console via FTP".to_string(),
-                percent: pct,
-                details: Some(format!(
-                    "{} ({:.1} MB / {:.1} MB)",
-                    file_name,
-                    uploaded_bytes as f64 / 1_000_000.0,
-                    total_bytes as f64 / 1_000_000.0
-                )),
-                bytes_processed: uploaded_bytes,
-                total_bytes,
-            });
-
-            let mut cmd = std::process::Command::new("curl");
-            cmd.args(["-s", "-S", "--ftp-create-dirs", "-T"]);
-            cmd.arg(&local_file);
-            cmd.args(["--user", &auth, &remote_url]);
-
-            let output = cmd
-                .output()
-                .context("Failed to execute curl for FTP transfer")?;
-            if !output.status.success() {
-                let err_msg = String::from_utf8_lossy(&output.stderr);
-                bail!("FTP upload failed for {}: {}", file_name, err_msg.trim());
-            }
-
-            uploaded_bytes += size;
-        }
-
-        progress(ProgressUpdate {
-            stage: "FTP transfer completed successfully".to_string(),
-            percent: 100,
-            details: Some(format!("ftp://{}:{}{}", ftp.host, ftp.port, remote_base)),
-            bytes_processed: total_bytes,
-            total_bytes,
-        });
-
-        Ok(PathBuf::from(format!(
-            "ftp://{}:{}{}",
-            ftp.host, ftp.port, remote_base
-        )))
     }
 }
 
@@ -718,11 +590,6 @@ pub(crate) fn volume_label(path: &Path) -> Option<String> {
 pub(crate) fn volume_label(path: &Path) -> Option<String> {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
-}
-
-fn format_ftp_url(host: &str, port: u16, remote_path: &str) -> String {
-    let clean_path = remote_path.trim_start_matches('/');
-    format!("ftp://{}:{}/{}", host, port, clean_path)
 }
 
 fn walkdir_recursive(dir: &Path) -> Result<Vec<PathBuf>, Error> {

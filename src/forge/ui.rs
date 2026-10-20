@@ -605,9 +605,7 @@ impl ForgeUi {
         let final_destination =
             TransferManager::transfer(&conversion_result, &transfer_dest, progress_cb, cancelled)?;
 
-        if !matches!(&transfer_dest, TransferDestination::Ftp(_)) {
-            Self::validate_target_output(&final_destination, target_workflow)?;
-        }
+        Self::validate_target_output(&final_destination, target_workflow)?;
         if matches!(target_workflow, TargetWorkflow::Ps4ItemzFlow)
             && let TransferDestination::RemovableDrive { target_root, .. } = &transfer_dest
         {

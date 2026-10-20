@@ -603,22 +603,6 @@ fn xbox360_raw_split_roundtrip_is_sha256_identical() {
 }
 
 #[test]
-fn ftp_remains_a_post_conversion_destination() {
-    let destination =
-        iso2god::forge::TransferDestination::Ftp(iso2god::forge::transfer::FtpConfig {
-            host: "192.0.2.1".to_owned(),
-            port: 2121,
-            username: "anonymous".to_owned(),
-            password: None,
-            remote_path: "/data".to_owned(),
-        });
-    assert!(matches!(
-        destination,
-        iso2god::forge::TransferDestination::Ftp(_)
-    ));
-}
-
-#[test]
 fn catalog_contains_exactly_one_profile_for_every_platform() {
     assert!(std::ptr::eq(ForgeUi::platform_catalog(), PLATFORM_CATALOG));
     assert_eq!(PLATFORM_CATALOG.len(), Platform::ALL.len());
@@ -1111,37 +1095,6 @@ fn unique_new_handheld_extensions_route_without_emulator_metadata() {
         assert_eq!(detected.platform, platform);
         assert_eq!(detected.source_format, format);
     }
-}
-
-#[test]
-fn ftp_capability_covers_every_researched_console_backend() {
-    let supported = Platform::ALL
-        .into_iter()
-        .filter(|platform| platform.supports_ftp_configuration())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        supported,
-        vec![
-            Platform::PlayStation2,
-            Platform::PlayStation3,
-            Platform::PlayStation4,
-            Platform::PlayStation5,
-            Platform::Psp,
-            Platform::PlayStationVita,
-            Platform::OriginalXbox,
-            Platform::Xbox360,
-            Platform::NintendoDS,
-            Platform::NintendoDSi,
-            Platform::Nintendo3DS,
-            Platform::Wii,
-            Platform::WiiU,
-        ]
-    );
-    assert_eq!(Platform::PlayStation4.default_ftp_port(), 2121);
-    assert_eq!(Platform::PlayStation5.default_ftp_port(), 1337);
-    assert_eq!(Platform::PlayStationVita.default_ftp_port(), 1337);
-    assert_eq!(Platform::Nintendo3DS.default_ftp_port(), 5000);
-    assert!(!Platform::PlayStation1.supports_ftp_configuration());
 }
 
 fn create_test_sfo(entries: &[(&str, u16, &[u8])]) -> Vec<u8> {
