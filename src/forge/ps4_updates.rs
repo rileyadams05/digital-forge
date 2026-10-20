@@ -1,9 +1,11 @@
-//! Read and cache the latest public PS4 title-update metadata.
+//! Discover, filter, and download PS4 title updates.
 //!
-//! Sony's update feed exposes the current published version, not a version
-//! history. This module therefore deliberately models a single latest result
-//! and does not invent historical choices. HTTPS certificate validation stays
-//! enabled for metadata, manifests, and package downloads.
+//! Catalogue metadata and package downloading are separate concerns. Sony's
+//! public title feed is the configured source and can list multiple package
+//! versions. Itemzflow-style multi-entry `patches` responses
+//! can be parsed without relying on Itemzflow's undisclosed private API; those
+//! records are metadata-only until a supported package route is available.
+//! HTTPS certificate validation stays enabled throughout.
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine as _;
@@ -51,6 +53,279 @@ pub struct LatestUpdate {
     pub package_digest: Option<String>,
     pub manifest_url: String,
     pub metadata_url: String,
+}
+
+/// Provenance for an update catalogue record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateCatalogueSource {
+    SonyTitleFeed,
+    ItemzflowPatches,
+}
+
+/// Normalized update metadata independent of its retrieval/download backend.
+/// `raw_metadata` keeps the provider's complete record for fields Digital
+/// Forge does not yet interpret. `download_info` is present only when the
+/// record came from the verified Sony title-feed path used by our downloader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateCatalogueEntry {
+    pub title_id: String,
+    pub version: String,
+    pub size_bytes: Option<u64>,
+    pub endpoint: Option<String>,
+    pub required_firmware: Option<FirmwareVersion>,
+    pub content_id: Option<String>,
+    pub source: UpdateCatalogueSource,
+    pub raw_metadata: Value,
+    pub download_info: Option<LatestUpdate>,
+}
+
+/// Catalogue providers return metadata only. A provider must not imply that
+/// an entry is downloadable unless it supplies a verified supported route.
+pub trait UpdateCatalogueProvider {
+    fn updates_for_title(&self, title_id: &str) -> Result<Vec<UpdateCatalogueEntry>>;
+}
+
+/// Sony's title update feed provider, including every package entry advertised
+/// by the title's version XML.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SonyTitleFeedProvider;
+
+impl UpdateCatalogueProvider for SonyTitleFeedProvider {
+    fn updates_for_title(&self, title_id: &str) -> Result<Vec<UpdateCatalogueEntry>> {
+        Ok(sony_updates_for_title(title_id)?
+            .into_iter()
+            .map(UpdateCatalogueEntry::from_sony)
+            .collect())
+    }
+}
+
+impl UpdateCatalogueEntry {
+    fn from_sony(update: LatestUpdate) -> Self {
+        let raw_metadata = serde_json::json!({
+            "title": update.title.clone(),
+            "version": update.version.clone(),
+            "content_id": update.content_id.clone(),
+            "size": update.size_bytes,
+            "required_fw": update.required_firmware.as_ref().map(ToString::to_string),
+            "manifest_url": update.manifest_url.clone(),
+            "metadata_url": update.metadata_url.clone(),
+        });
+        Self {
+            title_id: update.title_id.clone(),
+            version: update.version.clone(),
+            size_bytes: update.size_bytes,
+            endpoint: Some(update.manifest_url.clone()),
+            required_firmware: update.required_firmware.clone(),
+            content_id: Some(update.content_id.clone()),
+            source: UpdateCatalogueSource::SonyTitleFeed,
+            raw_metadata,
+            download_info: Some(update),
+        }
+    }
+}
+
+/// Parse the public Itemzflow `patches` response shape. This deliberately does
+/// not fetch an endpoint: Itemzflow's checked-in source hides its PATCH_API_URL,
+/// so no private URL is guessed or recovered here. Parsed records are
+/// metadata-only and cannot be sent to the Sony downloader.
+pub fn parse_itemzflow_patches(title_id: &str, bytes: &[u8]) -> Result<Vec<UpdateCatalogueEntry>> {
+    let title_id = normalize_title_id(title_id)?;
+    let root: Value =
+        serde_json::from_slice(bytes).context("update catalogue is not valid JSON")?;
+    let patches = root
+        .get("patches")
+        .and_then(Value::as_array)
+        .context("update catalogue must contain a `patches` array")?;
+    let mut updates = Vec::with_capacity(patches.len());
+    for (index, patch) in patches.iter().enumerate() {
+        let field_error =
+            |field: &str| anyhow::anyhow!("patches[{index}] is missing or has invalid `{field}`");
+        if let Some(record_title_id) = ["title_id", "titleId", "titleid"]
+            .iter()
+            .find_map(|key| patch.get(*key).and_then(Value::as_str))
+        {
+            ensure!(
+                record_title_id.eq_ignore_ascii_case(&title_id),
+                "patches[{index}] belongs to {record_title_id}, not requested title {title_id}"
+            );
+        }
+        let version = patch
+            .get("version")
+            .and_then(value_as_text)
+            .filter(|value| is_safe_update_version(value))
+            .ok_or_else(|| field_error("version"))?;
+        let size_bytes = patch
+            .get("size")
+            .and_then(value_as_u64)
+            .filter(|size| *size > 0 && *size <= MAX_UPDATE_BYTES)
+            .ok_or_else(|| field_error("size"))?;
+        let endpoint = patch
+            .get("endpoint")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|endpoint| !endpoint.is_empty())
+            .ok_or_else(|| field_error("endpoint"))?
+            .to_owned();
+        let required_firmware = match patch.get("required_fw") {
+            None | Some(Value::Null) => None,
+            // Itemzflow stores the console firmware and required_fw as the
+            // same packed Orbis version integer, not as a decimal version
+            // string. Decode that integer using Sony's system_ver encoding.
+            // A zero value is Itemzflow's documented "unknown" sentinel.
+            Some(Value::Number(number)) => {
+                let packed = number
+                    .as_u64()
+                    .filter(|value| *value <= u32::MAX as u64)
+                    .ok_or_else(|| field_error("required_fw"))?;
+                if packed == 0 {
+                    None
+                } else {
+                    Some(
+                        FirmwareVersion::from_system_ver_decimal(&packed.to_string()).ok_or_else(
+                            || {
+                                anyhow::anyhow!(
+                                    "patches[{index}] has invalid packed `required_fw` value {packed}"
+                                )
+                            },
+                        )?,
+                    )
+                }
+            }
+            // Accept human-readable values from compatible third-party feeds,
+            // but do not interpret arbitrary decimal strings as packed values.
+            Some(Value::String(raw)) => Some(FirmwareVersion::parse(raw).with_context(|| {
+                format!("patches[{index}] has invalid `required_fw` value {raw:?}")
+            })?),
+            Some(_) => return Err(field_error("required_fw")),
+        };
+        let content_id = patch
+            .get("content_id")
+            .or_else(|| patch.get("contentId"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        if let Some(content_id) = &content_id
+            && let Some(content_title_id) =
+                crate::forge::detector::title_id_from_content_id(content_id)
+        {
+            ensure!(
+                content_title_id.eq_ignore_ascii_case(&title_id),
+                "patches[{index}] content ID {content_id} does not match requested title {title_id}"
+            );
+        }
+        updates.push(UpdateCatalogueEntry {
+            title_id: title_id.clone(),
+            version,
+            size_bytes: Some(size_bytes),
+            endpoint: Some(endpoint),
+            required_firmware,
+            content_id,
+            source: UpdateCatalogueSource::ItemzflowPatches,
+            raw_metadata: patch.clone(),
+            download_info: None,
+        });
+    }
+    sort_catalogue_newest_first(&mut updates);
+    Ok(updates)
+}
+
+/// Sort parsed numeric game versions newest-first without trusting provider
+/// response order. The stable order is retained for numerically equal labels.
+pub fn sort_catalogue_newest_first(updates: &mut [UpdateCatalogueEntry]) {
+    updates.sort_by(|left, right| {
+        compare_update_versions(&right.version, &left.version).unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+/// Keep records for this title with a known requirement no higher than the
+/// user's manually entered console firmware. Unknown requirements are excluded.
+pub fn compatible_catalogue_updates<'a>(
+    updates: &'a [UpdateCatalogueEntry],
+    title_id: &str,
+    console_firmware: &FirmwareVersion,
+) -> Vec<&'a UpdateCatalogueEntry> {
+    updates
+        .iter()
+        .filter(|update| {
+            update.title_id.eq_ignore_ascii_case(title_id)
+                && update
+                    .required_firmware
+                    .as_ref()
+                    .is_some_and(|required| required.compatible_with(console_firmware))
+        })
+        .collect()
+}
+
+/// Get selectable indices in catalogue order. Records without a download route
+/// remain visible as metadata but cannot be selected for a conversion.
+pub fn selectable_update_indices(
+    updates: &[UpdateCatalogueEntry],
+    title_id: &str,
+    console_firmware: &FirmwareVersion,
+) -> Vec<usize> {
+    updates
+        .iter()
+        .enumerate()
+        .filter(|(_, update)| {
+            update.title_id.eq_ignore_ascii_case(title_id)
+                && update.download_info.is_some()
+                && update
+                    .required_firmware
+                    .as_ref()
+                    .is_some_and(|required| required.compatible_with(console_firmware))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Compare dotted numeric game-version labels component-wise.
+pub fn compare_update_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let parse = |version: &str| -> Option<Vec<u32>> {
+        if !is_safe_update_version(version) {
+            return None;
+        }
+        version.split('.').map(|part| part.parse().ok()).collect()
+    };
+    let mut left = parse(left)?;
+    let mut right = parse(right)?;
+    let width = left.len().max(right.len());
+    left.resize(width, 0);
+    right.resize(width, 0);
+    Some(left.cmp(&right))
+}
+
+fn is_safe_update_version(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 32
+        && version.split('.').all(|part| {
+            !part.is_empty() && part.len() <= 9 && part.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+fn value_as_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.trim().to_owned()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+fn value_as_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number.as_u64(),
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// Return records from the configured public provider. The Sony provider is
+/// intentionally the only live provider; the public title XML can include
+/// multiple version-specific package and manifest records.
+pub fn update_catalogue(title_id: &str) -> Result<Vec<UpdateCatalogueEntry>> {
+    let mut updates = SonyTitleFeedProvider.updates_for_title(title_id)?;
+    sort_catalogue_newest_first(&mut updates);
+    Ok(updates)
 }
 
 /// Human-readable PS4 firmware version with numeric, component-wise ordering.
@@ -166,6 +441,13 @@ pub struct UpdatePackage {
 /// Query Sony's published metadata for the latest update of a PS4 Title ID.
 /// `None` means the title's current feed returned HTTP 404 (no update entry).
 pub fn latest_update(title_id: &str) -> Result<Option<LatestUpdate>> {
+    let mut updates = sony_updates_for_title(title_id)?;
+    sort_latest_updates_newest_first(&mut updates);
+    Ok(updates.into_iter().next())
+}
+
+/// Query every update package version Sony lists in the public title XML.
+pub fn sony_updates_for_title(title_id: &str) -> Result<Vec<LatestUpdate>> {
     let title_id = normalize_title_id(title_id)?;
     let metadata_url = update_metadata_url(&title_id);
     let client = http_client()?;
@@ -177,11 +459,11 @@ pub fn latest_update(title_id: &str) -> Result<Option<LatestUpdate>> {
         )
     })?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let response = checked_response(response, &metadata_url)?;
     let bytes = read_limited(response, MAX_METADATA_BYTES)?;
-    parse_update_xml(&title_id, &metadata_url, &bytes).map(Some)
+    parse_update_xml_entries(&title_id, &metadata_url, &bytes)
 }
 
 /// Fetch the update manifest and return its official package URL and integrity
@@ -661,14 +943,28 @@ fn verify_download(path: &Path, package: &UpdatePackage) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn parse_update_xml(title_id: &str, metadata_url: &str, xml: &[u8]) -> Result<LatestUpdate> {
+    let mut updates = parse_update_xml_entries(title_id, metadata_url, xml)?;
+    sort_latest_updates_newest_first(&mut updates);
+    updates
+        .into_iter()
+        .next()
+        .context("Sony update feed has no package entry")
+}
+
+fn parse_update_xml_entries(
+    title_id: &str,
+    metadata_url: &str,
+    xml: &[u8],
+) -> Result<Vec<LatestUpdate>> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     let mut root_seen = false;
     let mut in_paramsfo = false;
     let mut title = None;
-    let mut package = None;
+    let mut packages = Vec::new();
     loop {
         match reader
             .read_event_into(&mut buf)
@@ -685,7 +981,7 @@ fn parse_update_xml(title_id: &str, metadata_url: &str, xml: &[u8]) -> Result<La
                 }
                 if name.as_ref() == b"paramsfo" {
                     in_paramsfo = true;
-                } else if name.as_ref() == b"package" && package.is_none() {
+                } else if name.as_ref() == b"package" {
                     let mut version = None;
                     let mut content_id = None;
                     let mut manifest_url = None;
@@ -710,7 +1006,7 @@ fn parse_update_xml(title_id: &str, metadata_url: &str, xml: &[u8]) -> Result<La
                             _ => {}
                         }
                     }
-                    package = Some((
+                    packages.push((
                         version,
                         content_id,
                         manifest_url,
@@ -735,47 +1031,66 @@ fn parse_update_xml(title_id: &str, metadata_url: &str, xml: &[u8]) -> Result<La
         buf.clear();
     }
     ensure!(root_seen, "PS4 update metadata is empty");
-    let (version, content_id, manifest_url, size_bytes, package_digest, system_ver) =
-        package.context("Sony update feed has no package entry")?;
-    let version = version.context("Sony update entry has no version")?;
     ensure!(
-        version.len() <= 24
-            && version.split('.').count() >= 2
-            && version
-                .split('.')
-                .all(|part| { !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()) }),
-        "Sony update entry has an invalid version"
+        !packages.is_empty(),
+        "Sony update feed has no package entry"
     );
-    let content_id = content_id.context("Sony update entry has no content ID")?;
-    ensure!(
-        content_id
-            .to_ascii_uppercase()
-            .contains(&title_id.to_ascii_uppercase()),
-        "Sony update content ID does not match base-game title ID {title_id}"
-    );
-    let manifest_url =
-        validate_sony_update_url(&manifest_url.context("Sony update entry has no manifest URL")?)?
-            .into();
-    let package_digest = package_digest.filter(|digest| is_hex_digest(digest, 64));
-    if let Some(size) = size_bytes {
-        ensure!(
-            size > 0 && size <= MAX_UPDATE_BYTES,
-            "update size is outside supported limits"
-        );
-    }
-    Ok(LatestUpdate {
-        title_id: title_id.to_owned(),
-        title,
-        version,
-        content_id,
-        size_bytes,
-        required_firmware: system_ver
-            .as_deref()
-            .and_then(FirmwareVersion::from_system_ver_decimal),
-        package_digest,
-        manifest_url,
-        metadata_url: metadata_url.to_owned(),
-    })
+    packages
+        .into_iter()
+        .enumerate()
+        .map(
+            |(
+                index,
+                (version, content_id, manifest_url, size_bytes, package_digest, system_ver),
+            )| {
+                let version =
+                    version.with_context(|| format!("Sony update entry {index} has no version"))?;
+                ensure!(
+                    is_safe_update_version(&version),
+                    "Sony update entry {index} has an invalid version"
+                );
+                let content_id = content_id
+                    .with_context(|| format!("Sony update entry {index} has no content ID"))?;
+                ensure!(
+                    content_id
+                        .to_ascii_uppercase()
+                        .contains(&title_id.to_ascii_uppercase()),
+                    "Sony update content ID does not match base-game title ID {title_id}"
+                );
+                let manifest_url =
+                    validate_sony_update_url(&manifest_url.with_context(|| {
+                        format!("Sony update entry {index} has no manifest URL")
+                    })?)?
+                    .into();
+                let package_digest = package_digest.filter(|digest| is_hex_digest(digest, 64));
+                if let Some(size) = size_bytes {
+                    ensure!(
+                        size > 0 && size <= MAX_UPDATE_BYTES,
+                        "update size is outside supported limits"
+                    );
+                }
+                Ok(LatestUpdate {
+                    title_id: title_id.to_owned(),
+                    title: title.clone(),
+                    version,
+                    content_id,
+                    size_bytes,
+                    required_firmware: system_ver
+                        .as_deref()
+                        .and_then(FirmwareVersion::from_system_ver_decimal),
+                    package_digest,
+                    manifest_url,
+                    metadata_url: metadata_url.to_owned(),
+                })
+            },
+        )
+        .collect()
+}
+
+fn sort_latest_updates_newest_first(updates: &mut [LatestUpdate]) {
+    updates.sort_by(|left, right| {
+        compare_update_versions(&right.version, &left.version).unwrap_or(std::cmp::Ordering::Equal)
+    });
 }
 
 fn normalize_title_id(title_id: &str) -> Result<String> {
@@ -1133,16 +1448,29 @@ mod tests {
     #[test]
     #[ignore = "queries the live Sony catalog for one public title"]
     fn live_sony_catalog_includes_a_firmware_requirement() {
-        let update = latest_update("CUSA00552")
-            .expect("live Sony catalog request must succeed")
-            .expect("Sony should publish an update for the fixture title");
-        eprintln!(
-            "Sony update {} v{} requires firmware {:?}",
-            update.title_id, update.version, update.required_firmware
-        );
+        let updates =
+            sony_updates_for_title("CUSA00552").expect("live Sony catalog request must succeed");
         assert!(
-            update.required_firmware.is_some(),
-            "Sony titlepatch entry should expose system_ver for compatibility filtering"
+            !updates.is_empty(),
+            "Sony should publish updates for the fixture title"
+        );
+        eprintln!(
+            "Sony listed {} update package version(s) for CUSA00552",
+            updates.len()
+        );
+        for update in &updates {
+            eprintln!(
+                "  v{} requires firmware {:?} ({} bytes)",
+                update.version,
+                update.required_firmware,
+                update.size_bytes.unwrap_or_default()
+            );
+        }
+        assert!(
+            updates
+                .iter()
+                .any(|update| update.required_firmware.is_some()),
+            "Sony titlepatch entries should expose system_ver for compatibility filtering"
         );
     }
 
@@ -1243,6 +1571,161 @@ mod tests {
                     .as_ref()
                     .is_some_and(|required| required.to_string() == "9.00"))
         );
+    }
+
+    #[test]
+    fn sony_title_xml_parses_multiple_versions_and_filters_firmware_numerically() {
+        let xml = br#"<?xml version="1.0"?>
+            <titlepatch titleid="CUSA00001"><tag>
+              <package version="01.9" content_id="IP9100-CUSA00001_00-PLAYROOM00000000"
+                size="1900" system_ver="150994944" manifest_url="http://gs2.ww.prod.dl.playstation.net/v19.json">
+                <paramsfo><title>THE PLAYROOM</title></paramsfo>
+              </package>
+              <package version="01.10" content_id="IP9100-CUSA00001_00-PLAYROOM00000000"
+                size="3100" system_ver="184549376" manifest_url="http://gs2.ww.prod.dl.playstation.net/v110.json"/>
+              <package version="01.11" content_id="IP9100-CUSA00001_00-PLAYROOM00000000"
+                size="4100" manifest_url="http://gs2.ww.prod.dl.playstation.net/v111.json"/>
+            </tag></titlepatch>"#;
+        let mut updates = parse_update_xml_entries("CUSA00001", "https://example", xml).unwrap();
+        sort_latest_updates_newest_first(&mut updates);
+        assert_eq!(
+            updates
+                .iter()
+                .map(|update| update.version.as_str())
+                .collect::<Vec<_>>(),
+            ["01.11", "01.10", "01.9"]
+        );
+        assert_eq!(updates[0].required_firmware, None);
+        assert_eq!(
+            updates[1].required_firmware.as_ref().unwrap().to_string(),
+            "11.00"
+        );
+        assert_eq!(
+            updates[2].required_firmware.as_ref().unwrap().to_string(),
+            "9.00"
+        );
+        let compatible = updates
+            .iter()
+            .filter(|update| {
+                update.required_firmware.as_ref().is_some_and(|required| {
+                    required.compatible_with(&FirmwareVersion::parse("9.00").unwrap())
+                })
+            })
+            .map(|update| update.version.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(compatible, ["01.9"]);
+    }
+
+    #[test]
+    fn itemzflow_patch_catalogue_parses_all_versions_sorts_numeric_and_preserves_fields() {
+        let json = br#"{
+            "patches": [
+                {"version":"1.10","size":3100,"endpoint":"https://updates.example/v110.pkg","required_fw":"11.00","note":"newer"},
+                {"version":"1.8","size":1800,"endpoint":"https://updates.example/v18.pkg","required_fw":150994944,"metadata":{"region":"US"}},
+                {"version":"1.9","size":"1900","endpoint":"https://updates.example/v19.pkg","note":"firmware omitted"}
+            ]
+        }"#;
+        let updates = parse_itemzflow_patches("CUSA00001", json).unwrap();
+        assert_eq!(
+            updates
+                .iter()
+                .map(|update| update.version.as_str())
+                .collect::<Vec<_>>(),
+            ["1.10", "1.9", "1.8"]
+        );
+        assert_eq!(updates[0].source, UpdateCatalogueSource::ItemzflowPatches);
+        assert_eq!(
+            updates[0].required_firmware,
+            Some(FirmwareVersion::parse("11.00").unwrap())
+        );
+        assert_eq!(updates[0].size_bytes, Some(3100));
+        assert_eq!(
+            updates[0].endpoint.as_deref(),
+            Some("https://updates.example/v110.pkg")
+        );
+        assert_eq!(updates[0].raw_metadata["note"], "newer");
+        assert_eq!(updates[1].required_firmware, None);
+        assert_eq!(
+            updates[2].required_firmware,
+            Some(FirmwareVersion::parse("9.00").unwrap())
+        );
+        assert!(updates.iter().all(|update| update.download_info.is_none()));
+
+        let compatible = compatible_catalogue_updates(
+            &updates,
+            "CUSA00001",
+            &FirmwareVersion::parse("9.00").unwrap(),
+        );
+        assert_eq!(compatible.len(), 1);
+        assert_eq!(compatible[0].version, "1.8");
+        assert!(
+            compatible_catalogue_updates(
+                &updates,
+                "CUSA99999",
+                &FirmwareVersion::parse("12.00").unwrap(),
+            )
+            .is_empty()
+        );
+        let mut downloadable_update = manifest_fixture_update();
+        downloadable_update.required_firmware = Some(FirmwareVersion::parse("9.00").unwrap());
+        let sony_candidate = UpdateCatalogueEntry::from_sony(downloadable_update);
+        assert_eq!(
+            selectable_update_indices(
+                &[sony_candidate],
+                "CUSA00001",
+                &FirmwareVersion::parse("12.00").unwrap(),
+            ),
+            [0]
+        );
+    }
+
+    #[test]
+    fn itemzflow_patch_catalogue_rejects_bad_schema_firmware_and_title_identity() {
+        for json in [
+            br#"{}"#.as_slice(),
+            br#"{"patches":[{"size":10,"endpoint":"https://x.test/a","required_fw":"9.00"}]}"#,
+            br#"{"patches":[{"version":"1.0","endpoint":"https://x.test/a","required_fw":"9.00"}]}"#,
+            br#"{"patches":[{"version":"1.0","size":10,"endpoint":"https://x.test/a","required_fw":"unknown"}]}"#,
+            br#"{"patches":[{"title_id":"CUSA99999","version":"1.0","size":10,"endpoint":"https://x.test/a"}]}"#,
+        ] {
+            assert!(parse_itemzflow_patches("CUSA00001", json).is_err());
+        }
+    }
+
+    #[test]
+    fn update_version_order_uses_numeric_components() {
+        assert_eq!(
+            compare_update_versions("01.10", "01.9"),
+            Some(std::cmp::Ordering::Greater)
+        );
+        assert_eq!(
+            compare_update_versions("1.2.0", "1.2"),
+            Some(std::cmp::Ordering::Equal)
+        );
+        assert_eq!(compare_update_versions("../1", "1.0"), None);
+    }
+
+    #[test]
+    fn itemzflow_numeric_required_firmware_uses_packed_orbis_version_and_zero_is_unknown() {
+        let json = br#"{"patches":[
+            {"version":"1.1","size":10,"endpoint":"https://example.invalid/a.pkg","required_fw":189923328},
+            {"version":"1.2","size":10,"endpoint":"https://example.invalid/b.pkg","required_fw":0}
+        ]}"#;
+        let updates = parse_itemzflow_patches("CUSA00001", json).unwrap();
+        let version_11 = updates
+            .iter()
+            .find(|update| update.version == "1.1")
+            .unwrap();
+        let version_12 = updates
+            .iter()
+            .find(|update| update.version == "1.2")
+            .unwrap();
+        assert_eq!(
+            version_11.required_firmware,
+            Some(FirmwareVersion::parse("11.52").unwrap())
+        );
+        assert_eq!(version_12.required_firmware, None);
+        assert_eq!(version_11.raw_metadata["required_fw"], 189923328);
     }
 
     fn manifest_fixture_update() -> LatestUpdate {
