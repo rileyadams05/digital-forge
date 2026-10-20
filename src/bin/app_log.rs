@@ -203,13 +203,11 @@ fn contains_secret_keyword(lower: &str) -> bool {
     const KEYWORDS: &[&str] = &[
         "password",
         "passwd",
-        "ftp password",
         "authorization:",
         "cookie:",
         "set-cookie:",
         "credential",
         "secret-tool",
-        "rclone_config_xbox_pass",
         "website username",
         "browser session",
     ];
