@@ -914,7 +914,10 @@ fn run_drag_and_drop_pipeline_logged(
     ))?;
 
     if classified.platform == iso2god::forge::Platform::PlayStation4 {
-        return run_ps4_ingest_flow(&classified, log);
+        let Some(firmware) = prompt_ps4_firmware_version()? else {
+            return Ok(());
+        };
+        return run_ps4_ingest_flow(&classified, firmware, log);
     }
 
     if classified.platform == iso2god::forge::Platform::PlayStation5 {
@@ -966,6 +969,7 @@ fn run_drag_and_drop_pipeline_logged(
             &sources[0],
             classified.platform,
             iso2god::forge::TargetWorkflow::EstablishedConsoleWorkflow,
+            None,
             log,
         );
     }
@@ -1366,6 +1370,7 @@ fn measure_source_payload_bytes(sources: &[PathBuf]) -> Result<u64, Error> {
 
 fn run_ps4_ingest_flow(
     classified: &ClassifiedSourceSet,
+    firmware: iso2god::forge::ps4_updates::FirmwareVersion,
     log: &mut OperationLog,
 ) -> Result<(), Error> {
     render_terminal_header()?;
@@ -1498,8 +1503,14 @@ fn run_ps4_ingest_flow(
     let update_group = build_content_group_from_sources("Update", &classified.update_sources)?;
     let dlc_group = build_content_group_from_sources("DLC", &classified.dlc_sources)?;
 
-    let result =
-        run_ps4_package_groups_flow(&base_group, &update_group, &dlc_group, target_workflow, log);
+    let result = run_ps4_package_groups_flow(
+        &base_group,
+        &update_group,
+        &dlc_group,
+        target_workflow,
+        firmware,
+        log,
+    );
     if result.is_ok() {
         offer_successful_test_log(classified.title_id.as_deref(), log)?;
         pause_to_continue()?;
@@ -1560,29 +1571,47 @@ fn run_manual_import_menu_logged(log: &mut OperationLog) -> Result<(), Error> {
             platform.display_name()
         ))?;
 
-        let Some(usage_mode) = iso2god::forge::ForgeUi::prompt_usage_mode(platform)? else {
+        if platform == iso2god::forge::Platform::PlayStation4 {
+            // This continuation contains the target choice and source picker,
+            // so neither can run until the user has supplied valid firmware.
+            let Some(()) = with_ps4_firmware_first(prompt_ps4_firmware_version, |firmware| {
+                run_platform_manual_import(
+                    platform,
+                    iso2god::forge::TargetWorkflow::Ps4InternalInstall,
+                    source,
+                    Some(firmware),
+                    log,
+                )
+                .map(Some)
+            })?
+            else {
+                return Ok(());
+            };
+            return Ok(());
+        }
+
+        let Some(target_workflow) = prompt_manual_import_target_workflow(platform)? else {
             if detected_platform.is_some() {
                 auto_detected_source = None;
                 continue;
             }
             return Ok(());
         };
-        let target_workflow = if let Some(workflow) =
-            iso2god::forge::target_workflow_for_usage(platform, usage_mode)
-        {
-            workflow
-        } else {
-            let Some(workflow) =
-                iso2god::forge::ForgeUi::prompt_target_workflow(platform, usage_mode)?
-            else {
-                continue;
-            };
-            workflow
-        };
-
-        run_platform_manual_import(platform, target_workflow, source, log)?;
+        run_platform_manual_import(platform, target_workflow, source, None, log)?;
         return Ok(());
     }
+}
+
+fn prompt_manual_import_target_workflow(
+    platform: iso2god::forge::Platform,
+) -> Result<Option<iso2god::forge::TargetWorkflow>, Error> {
+    let Some(usage_mode) = iso2god::forge::ForgeUi::prompt_usage_mode(platform)? else {
+        return Ok(None);
+    };
+    if let Some(workflow) = iso2god::forge::target_workflow_for_usage(platform, usage_mode) {
+        return Ok(Some(workflow));
+    }
+    iso2god::forge::ForgeUi::prompt_target_workflow(platform, usage_mode)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1979,11 +2008,16 @@ fn run_platform_manual_import(
     platform: iso2god::forge::Platform,
     target_workflow: iso2god::forge::TargetWorkflow,
     supplied_source: Option<PathBuf>,
+    ps4_firmware: Option<iso2god::forge::ps4_updates::FirmwareVersion>,
     log: &mut OperationLog,
 ) -> Result<(), Error> {
     render_terminal_header()?;
     println!("Manual Import — {}", platform.display_name());
     println!("========================================================\n");
+    ensure!(
+        platform != iso2god::forge::Platform::PlayStation4 || ps4_firmware.is_some(),
+        "PS4 System Software Version must be entered before selecting a game package"
+    );
 
     println!("Accepted source formats:");
     for format in iso2god::forge::ForgeUi::source_formats(platform) {
@@ -1992,6 +2026,16 @@ fn run_platform_manual_import(
     println!("\nPress ESC to return to the previous page.");
 
     let source = if let Some(source) = supplied_source {
+        source
+    } else if platform == iso2god::forge::Platform::PlayStation4 {
+        println!("\nEnter your firmware first; now select the base-game PKG.");
+        let Some(source) = rfd::FileDialog::new()
+            .set_title("Select PS4 base-game PKG")
+            .add_filter("PlayStation 4 package", &["pkg"])
+            .pick_file()
+        else {
+            return Ok(());
+        };
         source
     } else {
         println!("\nDrag and drop the package, disc image, archive, or game folder to import.\n");
@@ -2008,14 +2052,16 @@ fn run_platform_manual_import(
     }
 
     if source.is_dir() {
-        return run_folder_contract_import(&source, platform, target_workflow, log);
+        return run_folder_contract_import(&source, platform, target_workflow, ps4_firmware, log);
     }
 
     let base = scan_file_content_group("Base Game", &source)?;
     println!("\nBase Game accepted: {}", source.display());
 
-    println!("\nUpdate (Optional):");
-    println!("Drag and drop an Update package/archive, or press Enter to skip:\n");
+    if platform != iso2god::forge::Platform::PlayStation4 {
+        println!("\nUpdate (Optional):");
+        println!("Drag and drop an Update package/archive, or press Enter to skip:\n");
+    }
     let mut update = FolderContentGroup {
         label: "Update",
         directory: PathBuf::new(),
@@ -2023,7 +2069,9 @@ fn run_platform_manual_import(
         multipart_sets: Vec::new(),
         ordinary_items: 0,
     };
-    if let Some(dropped_update) = prompt_optional_dropped_path("Waiting for Update", None)? {
+    if platform != iso2god::forge::Platform::PlayStation4
+        && let Some(dropped_update) = prompt_optional_dropped_path("Waiting for Update", None)?
+    {
         update = if dropped_update.is_dir() {
             scan_folder_content_group("Update", &dropped_update, false)?
         } else {
@@ -2038,7 +2086,7 @@ fn run_platform_manual_import(
         multipart_sets: Vec::new(),
         ordinary_items: 0,
     };
-    if update.is_empty() && dlc.is_empty() {
+    if update.is_empty() && dlc.is_empty() && platform != iso2god::forge::Platform::PlayStation4 {
         let resolved_source = resolve_manual_import_source(&source)?;
         log.info(&format!(
             "Starting Digital Forge flow for {} ({})",
@@ -2059,7 +2107,15 @@ fn run_platform_manual_import(
         return pause_to_continue();
     }
 
-    run_package_groups_flow(&base, &update, &dlc, platform, target_workflow, log)
+    run_package_groups_flow(
+        &base,
+        &update,
+        &dlc,
+        platform,
+        target_workflow,
+        ps4_firmware,
+        log,
+    )
 }
 
 #[derive(Debug)]
@@ -2124,6 +2180,7 @@ fn run_folder_contract_import(
     root: &Path,
     platform: iso2god::forge::Platform,
     target_workflow: iso2god::forge::TargetWorkflow,
+    ps4_firmware: Option<iso2god::forge::ps4_updates::FirmwareVersion>,
     log: &mut OperationLog,
 ) -> Result<(), Error> {
     let (game_path, update_parent) = if platform == iso2god::forge::Platform::PlayStation3 {
@@ -2207,7 +2264,13 @@ fn run_folder_contract_import(
     if platform == iso2god::forge::Platform::PlayStation3 && base.is_empty() {
         match handle_empty_ps3_contract_folders(true, update.is_empty())? {
             Ps3EmptyFolderAction::Rescan => {
-                return run_folder_contract_import(root, platform, target_workflow, log);
+                return run_folder_contract_import(
+                    root,
+                    platform,
+                    target_workflow,
+                    ps4_firmware,
+                    log,
+                );
             }
             Ps3EmptyFolderAction::ContinueWithBase => {
                 unreachable!("the base-game-empty handler cannot continue without a base game")
@@ -2264,7 +2327,15 @@ fn run_folder_contract_import(
         }
     }
 
-    run_package_groups_flow(&base, &update, &dlc, platform, target_workflow, log)
+    run_package_groups_flow(
+        &base,
+        &update,
+        &dlc,
+        platform,
+        target_workflow,
+        ps4_firmware,
+        log,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2484,6 +2555,7 @@ fn run_package_groups_flow(
     dlc: &FolderContentGroup,
     platform: iso2god::forge::Platform,
     target_workflow: iso2god::forge::TargetWorkflow,
+    ps4_firmware: Option<iso2god::forge::ps4_updates::FirmwareVersion>,
     log: &mut OperationLog,
 ) -> Result<(), Error> {
     validate_group_multipart_sets(base)?;
@@ -2491,7 +2563,14 @@ fn run_package_groups_flow(
     validate_group_multipart_sets(dlc)?;
 
     if platform == iso2god::forge::Platform::PlayStation4 {
-        let result = run_ps4_package_groups_flow(base, update, dlc, target_workflow, log);
+        let firmware = match ps4_firmware {
+            Some(firmware) => firmware,
+            None => match prompt_ps4_firmware_version()? {
+                Some(firmware) => firmware,
+                None => return Ok(()),
+            },
+        };
+        let result = run_ps4_package_groups_flow(base, update, dlc, target_workflow, firmware, log);
         if result.is_ok() {
             let game_id = base.sources.first().and_then(|source| {
                 iso2god::forge::FormatDetector::detect(source, Some(platform))
@@ -2835,6 +2914,7 @@ fn run_ps4_package_groups_flow(
     update: &FolderContentGroup,
     dlc: &FolderContentGroup,
     target_workflow: iso2god::forge::TargetWorkflow,
+    firmware: iso2god::forge::ps4_updates::FirmwareVersion,
     log: &mut OperationLog,
 ) -> Result<(), Error> {
     let package_progress = Arc::new(Ps4PackageProgress::default());
@@ -3546,6 +3626,7 @@ fn run_ps4_package_groups_flow(
         {
             selected_update_source = discover_and_download_ps4_update(
                 &base_meta,
+                firmware,
                 &app_settings::config_dir()?.join("ps4-update-cache"),
                 &tool,
                 &package_progress,
@@ -5201,6 +5282,7 @@ fn read_ps4_pkg_metadata(tool: &Path, package: &Path) -> Result<Ps4PkgMetadata, 
 
 fn discover_and_download_ps4_update(
     base: &Ps4PkgMetadata,
+    initial_firmware: iso2god::forge::ps4_updates::FirmwareVersion,
     cache_root: &Path,
     tool: &Path,
     progress: &Ps4PackageProgress,
@@ -5208,19 +5290,7 @@ fn discover_and_download_ps4_update(
     log: &mut OperationLog,
 ) -> Result<Option<PathBuf>, Error> {
     let title_id = &base.title_id;
-    let mut firmware = loop {
-        let Some(value) = prompt_terminal_text("PS4 System Software Version", None, false)? else {
-            println!("No firmware version was entered; update filtering was skipped.");
-            log.info("User cancelled manual PS4 firmware entry; continuing base-game only")?;
-            return Ok(None);
-        };
-        match iso2god::forge::ps4_updates::FirmwareVersion::parse(&value) {
-            Ok(version) => break version,
-            Err(error) => println!(
-                "Invalid PS4 system software version: {error:#}. Try a value such as 9.00 or 11.52."
-            ),
-        }
-    };
+    let mut firmware = initial_firmware;
 
     println!("\nGame: {} ({title_id})", base.title);
     println!(
@@ -5343,7 +5413,7 @@ Update versions for {} ({title_id}) — base version {}, console firmware {firmw
         });
         match select_menu(&choices)? {
             Some(Ps4UpdateSelection::Specific(index)) => {
-                break updates[index].download_info.clone();
+                break selected_ps4_update(&updates, Ps4UpdateSelection::Specific(index))?;
             }
             Some(Ps4UpdateSelection::ChangeFirmware) => {
                 let Some(next_firmware) = prompt_ps4_firmware_version()? else {
@@ -5432,6 +5502,33 @@ enum Ps4UpdateSelection {
     ChangeFirmware,
 }
 
+fn selected_ps4_update(
+    updates: &[iso2god::forge::ps4_updates::UpdateCatalogueEntry],
+    selection: Ps4UpdateSelection,
+) -> Result<Option<iso2god::forge::ps4_updates::LatestUpdate>, Error> {
+    match selection {
+        Ps4UpdateSelection::BaseOnly => Ok(None),
+        Ps4UpdateSelection::Specific(index) => {
+            let entry = updates
+                .get(index)
+                .context("selected PS4 update is no longer in the available list")?;
+            let update = entry
+                .download_info
+                .clone()
+                .context("selected PS4 update has no verified download route")?;
+            ensure!(
+                update.version == entry.version
+                    && update.title_id.eq_ignore_ascii_case(&entry.title_id),
+                "selected update download metadata does not match the chosen version and game"
+            );
+            Ok(Some(update))
+        }
+        Ps4UpdateSelection::ChangeFirmware => {
+            bail!("firmware selection must be changed before selecting an update")
+        }
+    }
+}
+
 fn prompt_ps4_firmware_version()
 -> Result<Option<iso2god::forge::ps4_updates::FirmwareVersion>, Error> {
     loop {
@@ -5445,6 +5542,19 @@ fn prompt_ps4_firmware_version()
             ),
         }
     }
+}
+
+fn with_ps4_firmware_first<T>(
+    prompt_firmware: impl FnOnce()
+        -> Result<Option<iso2god::forge::ps4_updates::FirmwareVersion>, Error>,
+    continue_import: impl FnOnce(
+        iso2god::forge::ps4_updates::FirmwareVersion,
+    ) -> Result<Option<T>, Error>,
+) -> Result<Option<T>, Error> {
+    let Some(firmware) = prompt_firmware()? else {
+        return Ok(None);
+    };
+    continue_import(firmware)
 }
 
 fn compare_ps4_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
@@ -7353,6 +7463,39 @@ fn friendly_error(error: Error) -> Error {
 mod manual_import_tests {
     use super::*;
 
+    fn downloadable_catalogue_entry(
+        version: &str,
+    ) -> iso2god::forge::ps4_updates::UpdateCatalogueEntry {
+        use iso2god::forge::ps4_updates::{
+            FirmwareVersion, LatestUpdate, UpdateCatalogueEntry, UpdateCatalogueSource,
+        };
+
+        let title_id = "CUSA12345".to_owned();
+        let content_id = format!("EP0001-{title_id}_00-TESTTITLE00000000");
+        let update = LatestUpdate {
+            title_id: title_id.clone(),
+            title: Some("Synthetic Game".to_owned()),
+            version: version.to_owned(),
+            content_id: content_id.clone(),
+            size_bytes: Some(1024),
+            required_firmware: Some(FirmwareVersion::parse("9.00").unwrap()),
+            package_digest: None,
+            manifest_url: format!("https://updates.example/{title_id}/{version}.xml"),
+            metadata_url: format!("https://updates.example/{title_id}/{version}.json"),
+        };
+        UpdateCatalogueEntry {
+            title_id,
+            version: version.to_owned(),
+            size_bytes: Some(1024),
+            endpoint: Some(update.manifest_url.clone()),
+            required_firmware: update.required_firmware.clone(),
+            content_id: Some(content_id),
+            source: UpdateCatalogueSource::SonyTitleFeed,
+            raw_metadata: serde_json::json!({"version": version}),
+            download_info: Some(update),
+        }
+    }
+
     fn synthetic_sfo(category: &[u8], version: &[u8]) -> Vec<u8> {
         let entries: Vec<(&str, &[u8])> = vec![
             ("APP_VER", version),
@@ -7438,6 +7581,65 @@ mod manual_import_tests {
         assert_eq!(
             ps3_optional_update_prompt_text(),
             "No game update was detected.\n\nDo you have an update folder?\n\nDrag and drop your Update folder here,\nor press Enter to continue without an update."
+        );
+    }
+
+    #[test]
+    fn ps4_firmware_preflight_completes_before_import_continues() {
+        let steps = std::cell::RefCell::new(Vec::new());
+        let result = with_ps4_firmware_first(
+            || {
+                steps.borrow_mut().push("firmware");
+                Ok(Some(
+                    iso2god::forge::ps4_updates::FirmwareVersion::parse("9.00").unwrap(),
+                ))
+            },
+            |firmware| {
+                assert_eq!(firmware.to_string(), "9.00");
+                steps.borrow_mut().push("source selection");
+                Ok(Some(()))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result, Some(()));
+        assert_eq!(*steps.borrow(), ["firmware", "source selection"]);
+    }
+
+    #[test]
+    fn cancelling_ps4_firmware_preflight_never_opens_import_selection() {
+        let mut source_selection_opened = false;
+        let result = with_ps4_firmware_first(
+            || Ok(None),
+            |_| {
+                source_selection_opened = true;
+                Ok(Some(()))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result, None);
+        assert!(!source_selection_opened);
+    }
+
+    #[test]
+    fn selecting_an_older_ps4_update_keeps_its_exact_download_metadata() {
+        let updates = [
+            downloadable_catalogue_entry("1.05"),
+            downloadable_catalogue_entry("1.10"),
+        ];
+
+        let selected = selected_ps4_update(&updates, Ps4UpdateSelection::Specific(0))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(selected.version, "1.05");
+        assert!(selected.manifest_url.ends_with("/1.05.xml"));
+        assert_eq!(selected.title_id, "CUSA12345");
+        assert!(
+            selected_ps4_update(&updates, Ps4UpdateSelection::BaseOnly)
+                .unwrap()
+                .is_none()
         );
     }
 
