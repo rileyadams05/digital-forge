@@ -37,7 +37,8 @@ use iso2god::executable::TitleInfo;
 use iso2god::god::ContentType;
 use iso2god::{game_list, god, iso};
 use workflow::{
-    parse_dropped_paths_input, receive_ps5_dump, run_drag_and_drop_pipeline, select_ftp_platform,
+    parse_dropped_paths_input, receive_ps5_dump, run_drag_and_drop_pipeline,
+    run_manual_import_menu, select_ftp_platform,
 };
 
 #[derive(Parser)]
@@ -204,6 +205,7 @@ enum TerminalDelivery {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MainAction {
+    ManualImport,
     Exit,
     UpdateNow,
     ReceivePs5Dump,
@@ -288,6 +290,9 @@ fn terminal_application(dropped_sources: Vec<PathBuf>) -> Result<(), Error> {
 
         match action {
             MainAction::Exit => return Ok(()),
+            MainAction::ManualImport => {
+                run_manual_import_menu(None)?;
+            }
             MainAction::ReceivePs5Dump => {
                 receive_ps5_dump()?;
             }
@@ -528,21 +533,25 @@ fn open_folder_in_file_explorer(_path: &Path) -> Result<(), Error> {
 
 fn main_menu_options(update_was_deferred: bool) -> Vec<MenuOption<MainAction>> {
     let mut options = vec![MenuOption {
-        value: MainAction::ReceivePs5Dump,
-        label: "1. Receive PS5 game dump".to_owned(),
+        value: MainAction::ManualImport,
+        label: "1. Import a game (choose console and workflow)".to_owned(),
     }];
+    options.push(MenuOption {
+        value: MainAction::ReceivePs5Dump,
+        label: "2. Receive PS5 game dump".to_owned(),
+    });
     if update_was_deferred {
         options.push(MenuOption {
             value: MainAction::UpdateNow,
-            label: "2. Update now".to_owned(),
+            label: "3. Update now".to_owned(),
         });
     }
     options.push(MenuOption {
         value: MainAction::Exit,
         label: if update_was_deferred {
-            "3. Exit"
+            "4. Exit"
         } else {
-            "2. Exit"
+            "3. Exit"
         }
         .to_owned(),
     });
@@ -6655,16 +6664,21 @@ mod tests {
     }
 
     #[test]
-    fn pc_menu_exposes_ps5_receive_exit_and_optional_update() {
+    fn pc_menu_exposes_manual_import_ps5_receive_exit_and_optional_update() {
         let options = main_menu_options(false);
-        assert_eq!(options.len(), 2);
-        assert_eq!(options[0].value, MainAction::ReceivePs5Dump);
-        assert_eq!(options[1].value, MainAction::Exit);
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0].value, MainAction::ManualImport);
+        assert_eq!(
+            options[0].label,
+            "1. Import a game (choose console and workflow)"
+        );
+        assert_eq!(options[1].value, MainAction::ReceivePs5Dump);
+        assert_eq!(options[2].value, MainAction::Exit);
         let deferred_options = main_menu_options(true);
-        assert_eq!(deferred_options.len(), 3);
-        assert_eq!(deferred_options[1].value, MainAction::UpdateNow);
-        assert_eq!(deferred_options[1].label, "2. Update now");
-        assert_eq!(deferred_options[2].value, MainAction::Exit);
+        assert_eq!(deferred_options.len(), 4);
+        assert_eq!(deferred_options[2].value, MainAction::UpdateNow);
+        assert_eq!(deferred_options[2].label, "3. Update now");
+        assert_eq!(deferred_options[3].value, MainAction::Exit);
     }
 
     #[test]
