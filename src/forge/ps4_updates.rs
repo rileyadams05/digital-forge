@@ -43,11 +43,105 @@ pub struct LatestUpdate {
     pub version: String,
     pub content_id: String,
     pub size_bytes: Option<u64>,
+    /// Minimum firmware from Sony's decimal `system_ver` XML attribute.
+    /// Missing or invalid values remain unknown and must not be assumed safe.
+    pub required_firmware: Option<FirmwareVersion>,
     /// The digest embedded in the Sony PKG header, authenticated by the TLS
     /// title-update XML. It is not a SHA-256 hash of the entire PKG file.
     pub package_digest: Option<String>,
     pub manifest_url: String,
     pub metadata_url: String,
+}
+
+/// Human-readable PS4 firmware version with numeric, component-wise ordering.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FirmwareVersion(Vec<u16>);
+
+impl FirmwareVersion {
+    /// Parse a manually entered version such as `9.00` or `11.52`.
+    pub fn parse(value: &str) -> Result<Self> {
+        let parts = value.trim().split('.').collect::<Vec<_>>();
+        ensure!(
+            (2..=4).contains(&parts.len())
+                && parts.iter().all(|part| {
+                    !part.is_empty()
+                        && part.len() <= 2
+                        && part.bytes().all(|byte| byte.is_ascii_digit())
+                }),
+            "enter PS4 system software as numeric components, for example 9.00 or 11.52"
+        );
+        let parts = parts
+            .iter()
+            .map(|part| part.parse::<u16>())
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ensure!(
+            parts.iter().all(|part| *part <= 99),
+            "firmware components must be between 0 and 99"
+        );
+        let mut parts = parts;
+        while parts.len() > 2 && parts.last() == Some(&0) {
+            parts.pop();
+        }
+        Ok(Self(parts))
+    }
+
+    /// Sony encodes `system_ver` as a decimal representation of a packed BCD
+    /// word. Decode each byte into the displayed decimal firmware components.
+    pub fn from_system_ver_decimal(value: &str) -> Option<Self> {
+        let encoded = value.trim().parse::<u32>().ok()?;
+        if encoded == 0 {
+            return None;
+        }
+        let bytes = encoded.to_be_bytes();
+        let mut parts = vec![bytes[0] as u16];
+        for byte in &bytes[1..] {
+            let tens = *byte >> 4;
+            let ones = *byte & 0x0f;
+            if tens > 9 || ones > 9 {
+                return None;
+            }
+            parts.push((tens * 10 + ones) as u16);
+        }
+        while parts.len() > 2 && parts.last() == Some(&0) {
+            parts.pop();
+        }
+        (parts.len() >= 2).then_some(Self(parts))
+    }
+
+    pub fn compatible_with(&self, console: &Self) -> bool {
+        self <= console
+    }
+}
+
+impl std::fmt::Display for FirmwareVersion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, part) in self.0.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(".")?;
+                write!(formatter, "{part:02}")?;
+            } else {
+                write!(formatter, "{part}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Keep only updates whose required firmware is explicitly published and no
+/// newer than the firmware the user entered. Unknown requirements are omitted.
+pub fn compatible_updates<'a>(
+    updates: &'a [LatestUpdate],
+    console_firmware: &FirmwareVersion,
+) -> Vec<&'a LatestUpdate> {
+    updates
+        .iter()
+        .filter(|update| {
+            update
+                .required_firmware
+                .as_ref()
+                .is_some_and(|required| required.compatible_with(console_firmware))
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -597,6 +691,7 @@ fn parse_update_xml(title_id: &str, metadata_url: &str, xml: &[u8]) -> Result<La
                     let mut manifest_url = None;
                     let mut size_bytes = None;
                     let mut package_digest = None;
+                    let mut system_ver = None;
                     for attr in event.attributes() {
                         let attr = attr.context("invalid attribute in PS4 update XML")?;
                         let value = attr
@@ -611,6 +706,7 @@ fn parse_update_xml(title_id: &str, metadata_url: &str, xml: &[u8]) -> Result<La
                             b"manifest_url" => manifest_url = Some(value),
                             b"size" => size_bytes = value.parse::<u64>().ok(),
                             b"digest" => package_digest = Some(value.trim().to_ascii_uppercase()),
+                            b"system_ver" => system_ver = Some(value),
                             _ => {}
                         }
                     }
@@ -620,6 +716,7 @@ fn parse_update_xml(title_id: &str, metadata_url: &str, xml: &[u8]) -> Result<La
                         manifest_url,
                         size_bytes,
                         package_digest,
+                        system_ver,
                     ));
                 }
             }
@@ -638,7 +735,7 @@ fn parse_update_xml(title_id: &str, metadata_url: &str, xml: &[u8]) -> Result<La
         buf.clear();
     }
     ensure!(root_seen, "PS4 update metadata is empty");
-    let (version, content_id, manifest_url, size_bytes, package_digest) =
+    let (version, content_id, manifest_url, size_bytes, package_digest, system_ver) =
         package.context("Sony update feed has no package entry")?;
     let version = version.context("Sony update entry has no version")?;
     ensure!(
@@ -672,6 +769,9 @@ fn parse_update_xml(title_id: &str, metadata_url: &str, xml: &[u8]) -> Result<La
         version,
         content_id,
         size_bytes,
+        required_firmware: system_ver
+            .as_deref()
+            .and_then(FirmwareVersion::from_system_ver_decimal),
         package_digest,
         manifest_url,
         metadata_url: metadata_url.to_owned(),
@@ -984,7 +1084,7 @@ fn download_client() -> Result<reqwest::Client> {
 mod tests {
     use super::*;
 
-    const XML: &[u8] = br#"<?xml version="1.0"?><titlepatch titleid="CUSA00001"><tag><package version="01.07" content_id="IP9100-CUSA00001_00-PLAYROOM00000000" size="123456" digest="0000000000000000000000000000000000000000000000000000000000000000" manifest_url="http://gs2.ww.prod.dl.playstation.net/update.json"><paramsfo><title>THE PLAYROOM</title></paramsfo></package></tag></titlepatch>"#;
+    const XML: &[u8] = br#"<?xml version="1.0"?><titlepatch titleid="CUSA00001"><tag><package version="01.07" content_id="IP9100-CUSA00001_00-PLAYROOM00000000" size="123456" digest="0000000000000000000000000000000000000000000000000000000000000000" system_ver="150994944" manifest_url="http://gs2.ww.prod.dl.playstation.net/update.json"><paramsfo><title>THE PLAYROOM</title></paramsfo></package></tag></titlepatch>"#;
 
     #[test]
     fn sony_root_ca_is_valid_pem_with_the_pinned_fingerprint() {
@@ -1031,6 +1131,22 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "queries the live Sony catalog for one public title"]
+    fn live_sony_catalog_includes_a_firmware_requirement() {
+        let update = latest_update("CUSA00552")
+            .expect("live Sony catalog request must succeed")
+            .expect("Sony should publish an update for the fixture title");
+        eprintln!(
+            "Sony update {} v{} requires firmware {:?}",
+            update.title_id, update.version, update.required_firmware
+        );
+        assert!(
+            update.required_firmware.is_some(),
+            "Sony titlepatch entry should expose system_ver for compatibility filtering"
+        );
+    }
+
+    #[test]
     fn cdn_hostname_mismatch_is_detected_without_relaxing_tls() {
         let error =
             std::io::Error::other("The certificate's CN name does not match the passed value.");
@@ -1062,8 +1178,70 @@ mod tests {
         assert_eq!(update.content_id, "IP9100-CUSA00001_00-PLAYROOM00000000");
         assert_eq!(update.size_bytes, Some(123456));
         assert_eq!(
+            update.required_firmware.as_ref().unwrap().to_string(),
+            "9.00"
+        );
+        assert_eq!(
             update.package_digest.as_deref(),
             Some("0".repeat(64).as_str())
+        );
+    }
+
+    #[test]
+    fn firmware_versions_parse_numerically_and_reject_invalid_input() {
+        let fw_9 = FirmwareVersion::parse("9.00").unwrap();
+        let fw_11 = FirmwareVersion::parse("11.00").unwrap();
+        let fw_1152 = FirmwareVersion::parse("11.52").unwrap();
+        assert!(fw_9 < fw_11);
+        assert!(fw_1152.compatible_with(&FirmwareVersion::parse("12.00").unwrap()));
+        assert!(!fw_1152.compatible_with(&fw_11));
+        assert_eq!(FirmwareVersion::parse("11.52.0").unwrap(), fw_1152);
+        for invalid in ["", "9", "11.x", "11.100", "11.52.1.2.3", "9..00"] {
+            assert!(
+                FirmwareVersion::parse(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_or_missing_sony_firmware_requirement_stays_unknown() {
+        assert!(FirmwareVersion::from_system_ver_decimal("0").is_none());
+        assert!(FirmwareVersion::from_system_ver_decimal("not-a-number").is_none());
+        assert!(FirmwareVersion::from_system_ver_decimal("217710592").is_none());
+        assert_eq!(
+            FirmwareVersion::from_system_ver_decimal("189923328")
+                .unwrap()
+                .to_string(),
+            "11.52"
+        );
+    }
+
+    #[test]
+    fn update_filter_requires_known_firmware_and_compares_components_numerically() {
+        let mut older = manifest_fixture_update();
+        older.version = "01.08".into();
+        older.required_firmware = Some(FirmwareVersion::parse("9.00").unwrap());
+        let mut equal = manifest_fixture_update();
+        equal.version = "01.09".into();
+        equal.required_firmware = Some(FirmwareVersion::parse("11.52").unwrap());
+        let mut newer = manifest_fixture_update();
+        newer.version = "01.10".into();
+        newer.required_firmware = Some(FirmwareVersion::parse("12.00").unwrap());
+        let unknown = manifest_fixture_update();
+        let updates = [older, equal, newer, unknown];
+
+        let compatible = compatible_updates(&updates, &FirmwareVersion::parse("11.52").unwrap());
+        assert_eq!(compatible.len(), 2);
+        assert_eq!(compatible[0].version, "01.08");
+        assert_eq!(compatible[1].version, "01.09");
+        assert!(
+            compatible_updates(&updates, &FirmwareVersion::parse("9.00").unwrap())
+                .iter()
+                .all(|update| update
+                    .required_firmware
+                    .as_ref()
+                    .is_some_and(|required| required.to_string() == "9.00"))
         );
     }
 
@@ -1074,6 +1252,7 @@ mod tests {
             version: "01.07".into(),
             content_id: "IP9100-CUSA00001_00-PLAYROOM00000000".into(),
             size_bytes: Some(10),
+            required_firmware: None,
             package_digest: Some("A".repeat(64)),
             manifest_url: "http://gs2.ww.prod.dl.playstation.net/update.json".into(),
             metadata_url: "https://gs-sec.ww.np.dl.playstation.net/update.xml".into(),
@@ -1221,6 +1400,7 @@ mod tests {
             version: "01.11".into(),
             content_id: "UP9000-CUSA00552_00-THELASTOFUS00000".into(),
             size_bytes: Some(369_229_824),
+            required_firmware: None,
             package_digest: Some(
                 "83AA95883144F786C3BEACBCD72F158214B8D57B6E5D94A01DCD132B922BE398".into(),
             ),
