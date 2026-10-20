@@ -1480,40 +1480,61 @@ fn run_ps4_ingest_flow(
     }
     println!();
 
-    let target_workflow = if classified.itemzflow.is_some() {
-        println!("Itemzflow base/update dumps will be merged into one PS4 FPKG.");
-        Some(iso2god::forge::TargetWorkflow::Ps4InternalInstall)
-    } else {
-        let Some(usage_mode) =
-            iso2god::forge::ForgeUi::prompt_usage_mode(iso2god::forge::Platform::PlayStation4)?
+    let base_group = build_content_group_from_sources("Base Game", &classified.base_sources)?;
+    let mut update_group = build_content_group_from_sources("Update", &classified.update_sources)?;
+    let dlc_group = build_content_group_from_sources("DLC", &classified.dlc_sources)?;
+
+    // The update catalogue and choice belong immediately after firmware and
+    // game identification. Keep this ahead of target selection so the user
+    // sees the updates for this CUSA and firmware before unrelated choices.
+    let update_selection_completed =
+        update_group.sources.is_empty() && !base_group.sources.is_empty();
+    if update_selection_completed {
+        let tool = find_orbis_pkg_tool().context(
+            "Digital Forge could not find its managed OrbisPkgTool runtime to inspect the PS4 game",
+        )?;
+        let base_meta =
+            read_ps4_source_metadata_for_update_selection(&base_group, classified, &tool)?;
+        let progress = Arc::new(Ps4PackageProgress::default());
+        let selected = discover_and_download_ps4_update(
+            &base_meta,
+            firmware.clone(),
+            &app_settings::config_dir()?.join("ps4-update-cache"),
+            &tool,
+            &progress,
+            Arc::new(AtomicBool::new(false)),
+            log,
+        )?;
+        if let Some(package) = selected {
+            update_group = build_content_group_from_sources("Update", &[package])?;
+        }
+    }
+
+    let Some(usage_mode) =
+        iso2god::forge::ForgeUi::prompt_usage_mode(iso2god::forge::Platform::PlayStation4)?
+    else {
+        return Ok(());
+    };
+    let target_workflow = if usage_mode == iso2god::forge::UsageMode::PhysicalConsole {
+        let Some(storage) = iso2god::forge::ForgeUi::prompt_console_storage(
+            iso2god::forge::Platform::PlayStation4,
+        )?
         else {
             return Ok(());
         };
-        if usage_mode == iso2god::forge::UsageMode::PhysicalConsole {
-            let Some(storage) = iso2god::forge::ForgeUi::prompt_console_storage(
-                iso2god::forge::Platform::PlayStation4,
-            )?
-            else {
-                return Ok(());
-            };
-            iso2god::forge::target_workflow_for_console_storage(
-                iso2god::forge::Platform::PlayStation4,
-                storage,
-            )
-        } else {
-            iso2god::forge::target_workflow_for_usage(
-                iso2god::forge::Platform::PlayStation4,
-                usage_mode,
-            )
-        }
+        iso2god::forge::target_workflow_for_console_storage(
+            iso2god::forge::Platform::PlayStation4,
+            storage,
+        )
+    } else {
+        iso2god::forge::target_workflow_for_usage(
+            iso2god::forge::Platform::PlayStation4,
+            usage_mode,
+        )
     };
     let Some(target_workflow) = target_workflow else {
         return Ok(());
     };
-
-    let base_group = build_content_group_from_sources("Base Game", &classified.base_sources)?;
-    let update_group = build_content_group_from_sources("Update", &classified.update_sources)?;
-    let dlc_group = build_content_group_from_sources("DLC", &classified.dlc_sources)?;
 
     let result = run_ps4_package_groups_flow(
         &base_group,
@@ -1521,6 +1542,7 @@ fn run_ps4_ingest_flow(
         &dlc_group,
         target_workflow,
         firmware,
+        update_selection_completed,
         log,
     );
     if result.is_ok() {
@@ -2485,7 +2507,8 @@ fn run_package_groups_flow(
                 None => return Ok(()),
             },
         };
-        let result = run_ps4_package_groups_flow(base, update, dlc, target_workflow, firmware, log);
+        let result =
+            run_ps4_package_groups_flow(base, update, dlc, target_workflow, firmware, false, log);
         if result.is_ok() {
             let game_id = base.sources.first().and_then(|source| {
                 iso2god::forge::FormatDetector::detect(source, Some(platform))
@@ -2830,6 +2853,7 @@ fn run_ps4_package_groups_flow(
     dlc: &FolderContentGroup,
     target_workflow: iso2god::forge::TargetWorkflow,
     firmware: iso2god::forge::ps4_updates::FirmwareVersion,
+    update_selection_completed: bool,
     log: &mut OperationLog,
 ) -> Result<(), Error> {
     let package_progress = Arc::new(Ps4PackageProgress::default());
@@ -3536,6 +3560,7 @@ fn run_ps4_package_groups_flow(
             );
         }
         if selected_update_source.is_none()
+            && !update_selection_completed
             && target_format == iso2god::forge::TargetFormat::Ps4FakePkg
             && !base_meta.title_id.is_empty()
         {
@@ -5192,6 +5217,74 @@ fn read_ps4_pkg_metadata(tool: &Path, package: &Path) -> Result<Ps4PkgMetadata, 
         package_type,
         passcode_status,
         is_fake,
+    })
+}
+
+fn read_ps4_source_metadata_for_update_selection(
+    base: &FolderContentGroup,
+    classified: &ClassifiedSourceSet,
+    tool: &Path,
+) -> Result<Ps4PkgMetadata, Error> {
+    let source = base
+        .sources
+        .first()
+        .context("PS4 base-game input is missing")?;
+    let resolved = find_payload_pkg_or_dir(source);
+    if resolved.is_file()
+        && resolved
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("pkg"))
+    {
+        return read_ps4_pkg_metadata(tool, &resolved);
+    }
+
+    let sfo_candidates = [
+        resolved.join("sce_sys/param.sfo"),
+        resolved.join("Image0/sce_sys/param.sfo"),
+        resolved.join("Sc0/param.sfo"),
+        resolved.join("Base/Sc0/param.sfo"),
+        source.join("sce_sys/param.sfo"),
+        source.join("Image0/sce_sys/param.sfo"),
+        source.join("Sc0/param.sfo"),
+        source.join("Base/Sc0/param.sfo"),
+    ];
+    let sfo = sfo_candidates
+        .iter()
+        .find(|path| path.is_file())
+        .with_context(|| {
+            format!(
+                "could not find PS4 param.sfo for update lookup in {}",
+                source.display()
+            )
+        })?;
+    let read = |key: &str| iso2god::forge::FormatDetector::read_sfo_key(sfo, key);
+    let title = read("TITLE")
+        .or_else(|| classified.title_name.clone())
+        .unwrap_or_default();
+    let title_id = read("TITLE_ID")
+        .or_else(|| classified.title_id.clone())
+        .context("PS4 base-game metadata does not contain a detectable Title ID")?;
+    if let Some(classified_id) = classified.title_id.as_deref() {
+        ensure!(
+            title_id.eq_ignore_ascii_case(classified_id),
+            "PS4 base-game Title ID in param.sfo ({title_id}) disagrees with detected input ({classified_id})"
+        );
+    }
+    let content_id = read("CONTENT_ID").unwrap_or_default();
+    let version = read("APP_VER")
+        .or_else(|| classified.base_version.clone())
+        .unwrap_or_default();
+    let category = iso2god::forge::FormatDetector::read_sfo_category(sfo).unwrap_or_default();
+    Ok(Ps4PkgMetadata {
+        path: source.clone(),
+        title,
+        title_id,
+        content_id: content_id.clone(),
+        version,
+        category,
+        package_type: "Game folder".to_owned(),
+        passcode_status: "not applicable to folder input".to_owned(),
+        is_fake: content_id.contains("FPKG") || content_id.contains("FAKE"),
     })
 }
 
