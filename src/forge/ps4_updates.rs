@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine as _;
+use fs2::FileExt as _;
 use futures::StreamExt;
 use quick_xml::Reader;
 use quick_xml::events::Event;
@@ -647,6 +648,18 @@ pub fn download_update(
             destination_dir.display()
         )
     })?;
+    // Serialize cache validation and writes across test processes and app
+    // instances. All processes share the same title/version `.part` names.
+    let lock_path = destination_dir.join(".download.lock");
+    let cache_lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("could not open update cache lock {}", lock_path.display()))?;
+    cache_lock
+        .lock_exclusive()
+        .with_context(|| format!("could not lock update cache {}", destination_dir.display()))?;
     if let Some(size) = package.size_bytes {
         ensure!(
             fs2::available_space(&destination_dir)? >= size,
@@ -1398,6 +1411,83 @@ fn download_client() -> Result<reqwest::Client> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
+
+    struct LiveSonyFixture {
+        update: LatestUpdate,
+        package: UpdatePackage,
+        path: PathBuf,
+    }
+
+    static LIVE_SONY_FIXTURE: OnceLock<std::result::Result<LiveSonyFixture, String>> =
+        OnceLock::new();
+
+    fn live_sony_fixture() -> std::result::Result<&'static LiveSonyFixture, String> {
+        LIVE_SONY_FIXTURE
+            .get_or_init(|| {
+                let mut updates = sony_updates_for_title("CUSA00552")
+                    .map_err(|error| format!("Sony catalogue lookup failed: {error:#}"))?;
+                let update = updates
+                    .drain(..)
+                    .max_by(|left, right| {
+                        compare_update_versions(&left.version, &right.version)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .ok_or_else(|| "Sony published no update for CUSA00552".to_owned())?;
+                if update.title_id != "CUSA00552" {
+                    return Err("Sony fixture title ID differs from the requested title".to_owned());
+                }
+                if !update.content_id.contains("CUSA00552") {
+                    return Err("Sony fixture content ID does not match CUSA00552".to_owned());
+                }
+                let package = update_package(&update).map_err(|error| {
+                    format!("Sony update manifest validation failed: {error:#}")
+                })?;
+                let cache_root = live_sony_cache_root();
+                let path = download_update(
+                    &update,
+                    &package,
+                    &cache_root,
+                    Arc::new(AtomicBool::new(false)),
+                    |done, total| {
+                        if total.is_some_and(|total| done == total)
+                            || done % (64 * 1024 * 1024) < 1024 * 1024
+                        {
+                            eprintln!("Sony update fixture download: {done}/{total:?} bytes");
+                        }
+                    },
+                )
+                .map_err(|error| format!("Sony update download/verification failed: {error:#}"))?;
+                verify_download(&path, &package)
+                    .map_err(|error| format!("cached Sony PKG validation failed: {error:#}"))?;
+                verify_download_pieces(&path, &package.pieces).map_err(|error| {
+                    format!("cached Sony piece-hash validation failed: {error:#}")
+                })?;
+                Ok(LiveSonyFixture {
+                    update,
+                    package,
+                    path,
+                })
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    fn live_sony_cache_root() -> PathBuf {
+        if let Some(path) = std::env::var_os("DIGITAL_FORGE_TEST_CACHE") {
+            return PathBuf::from(path).join("sony-ps4-updates");
+        }
+        if let Some(path) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(path)
+                .join("DigitalForge")
+                .join("test-cache")
+                .join("sony-ps4-updates");
+        }
+        if let Some(path) = std::env::var_os("XDG_CACHE_HOME") {
+            return PathBuf::from(path).join("digital-forge/sony-ps4-updates");
+        }
+        std::env::temp_dir().join("digital-forge/sony-ps4-updates")
+    }
 
     const XML: &[u8] = br#"<?xml version="1.0"?><titlepatch titleid="CUSA00001"><tag><package version="01.07" content_id="IP9100-CUSA00001_00-PLAYROOM00000000" size="123456" digest="0000000000000000000000000000000000000000000000000000000000000000" system_ver="150994944" manifest_url="http://gs2.ww.prod.dl.playstation.net/update.json"><paramsfo><title>THE PLAYROOM</title></paramsfo></package></tag></titlepatch>"#;
 
@@ -1407,46 +1497,33 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "downloads the live public CUSA00552 update from Sony"]
     fn live_sony_update_download_and_pkg_validation() {
-        let update = latest_update("CUSA00552").expect("live Sony feed request must succeed");
-        let update = update.expect("Sony should publish an update for the fixture title");
+        let fixture = live_sony_fixture().unwrap_or_else(|error| panic!("{error}"));
         eprintln!(
             "Sony update catalog: {} — {} ({:?} bytes)",
-            update.title_id, update.version, update.size_bytes
+            fixture.update.title_id, fixture.update.version, fixture.update.size_bytes
         );
-        let package =
-            update_package(&update).expect("Sony manifest must pass authenticated validation");
         eprintln!(
             "Sony package manifest accepted; package size {:?} bytes",
-            package.size_bytes
+            fixture.package.size_bytes
         );
-        assert_eq!(update.title_id, "CUSA00552");
-        assert!(!update.version.is_empty());
-        let cache =
-            std::env::temp_dir().join(format!("digital-forge-live-update-{}", std::process::id()));
-        let path = download_update(
-            &update,
-            &package,
-            &cache,
-            Arc::new(AtomicBool::new(false)),
-            |done, total| {
-                if done == total.unwrap_or_default() || done % (64 * 1024 * 1024) < 1024 * 1024 {
-                    eprintln!("Sony update download: {done}/{total:?} bytes");
-                }
-            },
-        )
-        .expect("Sony update must download and pass PKG validation");
+        assert_eq!(fixture.update.title_id, "CUSA00552");
+        assert!(!fixture.update.version.is_empty());
         assert_eq!(
-            fs::metadata(&path).unwrap().len(),
-            package.size_bytes.unwrap()
+            fs::metadata(&fixture.path).unwrap().len(),
+            fixture.package.size_bytes.unwrap()
         );
-        verify_download(&path, &package).expect("cached update must pass package verification");
-        eprintln!("Verified live Sony update PKG at {}", path.display());
+        verify_download(&fixture.path, &fixture.package)
+            .expect("downloaded update must pass package verification");
+        verify_download_pieces(&fixture.path, &fixture.package.pieces)
+            .expect("downloaded update must pass every Sony piece hash");
+        eprintln!(
+            "Verified live Sony update PKG at {}",
+            fixture.path.display()
+        );
     }
 
     #[test]
-    #[ignore = "queries the live Sony catalog for one public title"]
     fn live_sony_catalog_includes_a_firmware_requirement() {
         let updates =
             sony_updates_for_title("CUSA00552").expect("live Sony catalog request must succeed");
@@ -1466,6 +1543,15 @@ mod tests {
                 update.size_bytes.unwrap_or_default()
             );
         }
+        assert!(updates.iter().all(|update| update.title_id == "CUSA00552"));
+        assert!(
+            updates.iter().any(|update| {
+                !update.version.is_empty()
+                    && update.content_id.contains("CUSA00552")
+                    && update.required_firmware.is_some()
+            }),
+            "Sony catalogue entries must include title identity, version and firmware requirement"
+        );
         assert!(
             updates
                 .iter()
@@ -1874,41 +1960,25 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "uses the locally cached, live Sony CUSA00552 update PKG"]
     fn cached_live_sony_update_matches_feed_and_piece_hashes() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp/CUSA00552-A0111-update.pkg");
-        let update = LatestUpdate {
-            title_id: "CUSA00552".into(),
-            title: Some("The Last of Us Remastered".into()),
-            version: "01.11".into(),
-            content_id: "UP9000-CUSA00552_00-THELASTOFUS00000".into(),
-            size_bytes: Some(369_229_824),
-            required_firmware: None,
-            package_digest: Some(
-                "83AA95883144F786C3BEACBCD72F158214B8D57B6E5D94A01DCD132B922BE398".into(),
-            ),
-            manifest_url: String::new(),
-            metadata_url: String::new(),
-        };
-        let package = UpdatePackage {
-            url: String::new(),
-            size_bytes: update.size_bytes,
-            package_digest: update.package_digest.clone(),
-            sha256: None,
-            title_id: update.title_id.clone(),
-            content_id: update.content_id.clone(),
-            pieces: vec![UpdatePiece {
-                url: String::new(),
-                file_offset: 0,
-                size_bytes: 369_229_824,
-                sha1: "1DC7552C27228AD69C297EE1A1A4FEE5C2AB67CA".into(),
-            }],
-        };
-        verify_download(&path, &package)
-            .expect("real Sony update should pass PKG identity validation");
-        verify_piece(&path, &package.pieces[0])
-            .expect("real Sony update should match its piece hash");
-        verify_download_pieces(&path, &package.pieces)
-            .expect("cached Sony update should recheck its piece hash");
+        let fixture = live_sony_fixture().unwrap_or_else(|error| panic!("{error}"));
+        let fresh = sony_updates_for_title(&fixture.update.title_id)
+            .expect("fresh TLS-authenticated Sony feed lookup must succeed")
+            .into_iter()
+            .find(|entry| entry.version == fixture.update.version)
+            .expect("cached update version must still be advertised by Sony");
+        assert_eq!(fresh.content_id, fixture.update.content_id);
+        assert_eq!(fresh.package_digest, fixture.update.package_digest);
+        let fresh_package =
+            update_package(&fresh).expect("fresh Sony manifest must describe the cached update");
+        assert_eq!(fresh_package.size_bytes, fixture.package.size_bytes);
+        verify_download(&fixture.path, &fresh_package)
+            .expect("cached update must match current feed metadata and PKG identity");
+        verify_download_pieces(&fixture.path, &fresh_package.pieces)
+            .expect("cached update must match all current Sony piece hashes");
+        assert_eq!(
+            fixture.path.file_name().and_then(|name| name.to_str()),
+            Some("CUSA00552.pkg")
+        );
     }
 }

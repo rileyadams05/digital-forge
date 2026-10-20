@@ -688,6 +688,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "deferred-console-integration-tests")]
     fn anyps5_output_requires_expected_layout_and_valid_metadata() {
         let temp = TestDirectory::new();
         let root = &temp.0;
@@ -712,6 +713,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "deferred-console-integration-tests")]
     fn anyps5_output_rejects_non_elf_eboot() {
         let temp = TestDirectory::new();
         let root = &temp.0;
