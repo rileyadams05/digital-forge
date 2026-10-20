@@ -5232,11 +5232,11 @@ fn discover_and_download_ps4_update(
         }
     );
     println!("PS4 System Software Version: {firmware}");
-    println!("Checking Sony's public update catalog for detected title ID {title_id}...");
+    println!("Checking available update catalogues for detected title ID {title_id}...");
     progress.render(42, "Update check", "Checking published metadata");
-    let update = match iso2god::forge::ps4_updates::latest_update(title_id) {
-        Ok(Some(update)) => update,
-        Ok(None) => {
+    let mut updates = match iso2god::forge::ps4_updates::update_catalogue(title_id) {
+        Ok(updates) if !updates.is_empty() => updates,
+        Ok(_) => {
             println!("No update is currently listed for {title_id}.");
             log.info(&format!(
                 "Sony's public update feed returned no update for {title_id}"
@@ -5245,9 +5245,7 @@ fn discover_and_download_ps4_update(
         }
         Err(error) => {
             println!("Could not check Sony's public update catalog: {error:#}");
-            log.info(&format!(
-                "Update discovery failed for {title_id}; base-game conversion can continue: {error:#}"
-            ))?;
+            log.info(&format!("Update discovery failed for {title_id}; base-game conversion can continue: {error:#}"))?;
             if prompt_yes_no_key("Continue building the base game without an update?", true)?
                 == Some(true)
             {
@@ -5256,118 +5254,114 @@ fn discover_and_download_ps4_update(
             bail!("PS4 package conversion cancelled after update discovery failed")
         }
     };
-    if !base.version.is_empty()
-        && compare_ps4_versions(&update.version, &base.version)
-            .is_some_and(|ordering| ordering != std::cmp::Ordering::Greater)
-    {
-        println!(
-            "The listed update is not newer than the base-game version; it will not be downloaded."
-        );
+    updates.retain(|update| {
+        update.title_id.eq_ignore_ascii_case(title_id)
+            && (base.version.is_empty()
+                || iso2god::forge::ps4_updates::compare_update_versions(
+                    &update.version,
+                    &base.version,
+                )
+                .is_none_or(|ordering| ordering == std::cmp::Ordering::Greater))
+    });
+    if updates.is_empty() {
+        println!("No newer update is listed for {title_id}; continuing with the base game.");
         log.info(&format!(
-            "Latest PS4 update {} v{} is not newer than base v{}",
-            title_id, update.version, base.version
+            "No newer catalogue update was available for {title_id}"
         ))?;
         return Ok(None);
     }
 
     let selected_update = loop {
-        let compatible = iso2god::forge::ps4_updates::compatible_updates(
-            std::slice::from_ref(&update),
-            &firmware,
-        );
-        if compatible.is_empty() {
-            match update.required_firmware.as_ref() {
-                Some(required) => println!(
-                    "Latest update v{} requires PS4 System Software {required}; it is not compatible with the entered {firmware}.",
-                    update.version
-                ),
-                None => println!(
-                    "Latest update v{} has no valid published system_ver requirement. Its compatibility cannot be confirmed, so it will not be offered.",
-                    update.version
-                ),
-            }
-            println!(
-                "No compatible update is available for the entered firmware. You can still build the base game only."
-            );
-            let choices = [
-                MenuOption {
-                    value: Ps4UpdateSelection::BaseOnly,
-                    label: "Base game only (no update)".to_owned(),
-                },
-                MenuOption {
-                    value: Ps4UpdateSelection::ChangeFirmware,
-                    label: "Enter a different PS4 System Software Version".to_owned(),
-                },
-            ];
-            match select_menu(&choices)? {
-                Some(Ps4UpdateSelection::ChangeFirmware) => {
-                    let Some(next_firmware) = prompt_ps4_firmware_version()? else {
-                        log.info("User cancelled firmware change; continuing with base-game only")?;
-                        return Ok(None);
-                    };
-                    firmware = next_firmware;
-                    continue;
-                }
-                _ => {
-                    log.info(&format!("No explicitly compatible PS4 update was selected for {title_id} on firmware {firmware}"))?;
-                    return Ok(None);
-                }
-            }
-        }
-
-        let required = update
-            .required_firmware
-            .as_ref()
-            .expect("filtered update has a known requirement");
-        let size = update
-            .size_bytes
-            .map(format_bytes)
-            .unwrap_or_else(|| "size not published".to_owned());
         println!(
-            "\nLatest compatible update: v{} (requires {required}, {size})\nGame: {} ({title_id})\nBase version: {}\nUpdate Content ID: {}\nSony's public title feed currently returns only the latest published update.",
-            update.version,
-            update.title.as_deref().unwrap_or(&base.title),
+            "
+Update versions for {} ({title_id}) — base version {}, console firmware {firmware}:",
+            base.title,
             if base.version.is_empty() {
                 "unknown"
             } else {
                 &base.version
-            },
-            update.content_id
+            }
         );
-        let choices = [
-            MenuOption {
-                value: Ps4UpdateSelection::BaseOnly,
-                label: "Base game only (no update)".to_owned(),
-            },
-            MenuOption {
-                value: Ps4UpdateSelection::LatestCompatible,
-                label: format!("Use latest compatible update v{}", update.version),
-            },
-            MenuOption {
-                value: Ps4UpdateSelection::ChangeFirmware,
-                label: "Change PS4 System Software Version".to_owned(),
-            },
-        ];
+        let compatible = iso2god::forge::ps4_updates::compatible_catalogue_updates(
+            &updates, title_id, &firmware,
+        );
+        for update in &updates {
+            let required = update
+                .required_firmware
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "unknown".to_owned());
+            let size = update
+                .size_bytes
+                .map(format_bytes)
+                .unwrap_or_else(|| "size not published".to_owned());
+            let status = match update.required_firmware.as_ref() {
+                None => "not selectable: firmware requirement unknown",
+                Some(required) if !required.compatible_with(&firmware) => {
+                    "not compatible with entered firmware"
+                }
+                Some(_) if update.download_info.is_none() => {
+                    "compatible metadata; no verified download route"
+                }
+                Some(_) => "compatible and downloadable",
+            };
+            println!(
+                "  v{} | requires {required} | {size} | {status}",
+                update.version
+            );
+        }
+        let downloadable =
+            iso2god::forge::ps4_updates::selectable_update_indices(&updates, title_id, &firmware);
+        if compatible.is_empty() {
+            println!(
+                "No update has a known firmware requirement compatible with {firmware}. You can still build the base game only."
+            );
+        } else if downloadable.is_empty() {
+            println!(
+                "Compatible catalogue metadata exists, but none has a verified download route. You can still build the base game only."
+            );
+        }
+        let mut choices = vec![MenuOption {
+            value: Ps4UpdateSelection::BaseOnly,
+            label: "Base game only (no update)".to_owned(),
+        }];
+        for (position, index) in downloadable.iter().copied().enumerate() {
+            let update = &updates[index];
+            let label = if position == 0 {
+                format!("Use latest compatible update v{}", update.version)
+            } else {
+                format!("Select specific update v{}", update.version)
+            };
+            choices.push(MenuOption {
+                value: Ps4UpdateSelection::Specific(index),
+                label,
+            });
+        }
+        choices.push(MenuOption {
+            value: Ps4UpdateSelection::ChangeFirmware,
+            label: "Change PS4 System Software Version".to_owned(),
+        });
         match select_menu(&choices)? {
-            Some(Ps4UpdateSelection::LatestCompatible) => break Some(update.clone()),
+            Some(Ps4UpdateSelection::Specific(index)) => {
+                break updates[index].download_info.clone();
+            }
             Some(Ps4UpdateSelection::ChangeFirmware) => {
                 let Some(next_firmware) = prompt_ps4_firmware_version()? else {
-                    log.info("User cancelled firmware change; continuing with base-game only")?;
+                    log.info("User cancelled firmware change; continuing base-game only")?;
                     return Ok(None);
                 };
                 firmware = next_firmware;
             }
             _ => {
                 log.info(&format!(
-                    "Latest compatible PS4 update {} v{} was not selected",
-                    title_id, update.version
+                    "No PS4 update was selected for {title_id} on firmware {firmware}"
                 ))?;
                 return Ok(None);
             }
         }
     };
     let Some(update) = selected_update else {
-        return Ok(None);
+        bail!("selected PS4 update has no verified Sony download route")
     };
     ensure!(
         !cancelled.load(Ordering::Relaxed),
@@ -5434,7 +5428,7 @@ fn discover_and_download_ps4_update(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ps4UpdateSelection {
     BaseOnly,
-    LatestCompatible,
+    Specific(usize),
     ChangeFirmware,
 }
 
