@@ -285,8 +285,7 @@ fn inspect_candidate(path: &Path, hint: Option<ContentRole>) -> ScannedCandidate
     }
 
     if path.is_dir() {
-        let sfo = path.join("sce_sys").join("param.sfo");
-        if sfo.is_file() {
+        if let Some(sfo) = ps4_payload_sfo(path) {
             candidate.platform = Some(iso2god::forge::Platform::PlayStation4);
             let (tid, tname) = iso2god::forge::FormatDetector::read_sfo(&sfo);
             candidate.title_id = tid;
@@ -482,10 +481,14 @@ fn inspect_candidate(path: &Path, hint: Option<ContentRole>) -> ScannedCandidate
     }
 
     if let Ok(det) = iso2god::forge::FormatDetector::detect(path, None) {
-        candidate.platform = Some(det.platform);
-        candidate.title_id = det.game_id;
-        candidate.title_name = det.title_name;
-        candidate.role = ContentRole::BaseGame;
+        if det.source_format != iso2god::forge::SourceFormat::Unknown {
+            candidate.platform = Some(det.platform);
+            candidate.title_id = det.game_id;
+            candidate.title_name = det.title_name;
+            if candidate.role == ContentRole::Unknown {
+                candidate.role = ContentRole::BaseGame;
+            }
+        }
     }
 
     candidate
@@ -532,7 +535,7 @@ pub fn classify_source_set(sources: &[PathBuf]) -> Result<ClassifiedSourceSet, E
             parent
         };
         let update_child = find_named_child_directory_or_file(update_parent, "Update");
-        let dlc_child = find_named_child_directory_or_file(parent, "DLC");
+        let dlc_child = find_named_child_directory_or_file(update_parent, "DLC");
         if let Some(game_child) = game_child {
             candidate_paths.push((game_child, Some(ContentRole::BaseGame)));
         } else {
@@ -692,7 +695,22 @@ fn build_content_group_from_sources(
                 ordinary_items += 1;
                 continue;
             }
-            let scanned = scan_folder_content_group(label, src, false)?;
+            let mut scanned = scan_folder_content_group(label, src, false)?;
+            if label == "DLC" {
+                scanned.sources.retain(|path| {
+                    !path.is_file()
+                        || !path.extension().and_then(OsStr::to_str).is_some_and(|ext| {
+                            matches!(
+                                ext.to_ascii_lowercase().as_str(),
+                                "txt" | "log" | "gp4" | "complete"
+                            )
+                        })
+                });
+                scanned.ordinary_items = scanned
+                    .sources
+                    .len()
+                    .saturating_sub(scanned.multipart_sets.len());
+            }
             clean_sources.extend(scanned.sources);
             multipart_sets.extend(scanned.multipart_sets);
             ordinary_items += scanned.ordinary_items;
@@ -744,12 +762,7 @@ fn build_content_group_from_sources(
 }
 
 fn is_ps4_extracted_payload(directory: &Path) -> bool {
-    [
-        directory.join("sce_sys").join("param.sfo"),
-        directory.join("Image0").join("sce_sys").join("param.sfo"),
-    ]
-    .iter()
-    .any(|path| path.is_file())
+    ps4_payload_sfo(directory).is_some()
 }
 
 thread_local! {
@@ -763,6 +776,17 @@ impl Drop for ImportPasswordScope {
     fn drop(&mut self) {
         IMPORT_ARCHIVE_PASSWORDS.with(|passwords| passwords.borrow_mut().clear());
     }
+}
+
+fn ps4_payload_sfo(directory: &Path) -> Option<PathBuf> {
+    [
+        directory.join("sce_sys").join("param.sfo"),
+        directory.join("Image0").join("sce_sys").join("param.sfo"),
+        directory.join("Sc0").join("param.sfo"),
+        directory.join("Image0").join("Sc0").join("param.sfo"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
 }
 
 fn archive_password_for_import(source: &Path) -> Result<Option<String>, Error> {
@@ -1433,14 +1457,36 @@ fn run_ps4_ingest_flow(
     log: &mut OperationLog,
 ) -> Result<(), Error> {
     render_terminal_header()?;
-    println!("Detected {} Content", classified.platform.display_name());
-    println!("========================================================\n");
-
-    if let Some(ref title) = classified.title_name {
-        println!("Title:    {title}");
-    }
-    if let Some(ref id) = classified.title_id {
-        println!("Title ID: {id}");
+    let base_group = build_content_group_from_sources("Base Game", &classified.base_sources)?;
+    let mut update_group = build_content_group_from_sources("Update", &classified.update_sources)?;
+    let dlc_group = build_content_group_from_sources("DLC", &classified.dlc_sources)?;
+    let tool = find_orbis_pkg_tool().context("managed OrbisPkgTool inspector is unavailable")?;
+    let base_meta = read_ps4_source_metadata_for_update_selection(&base_group, classified, &tool)?;
+    ensure!(
+        matches!(base_meta.category.as_str(), "gd" | "gdc" | "gda"),
+        "selected base input is not a base-game package"
+    );
+    println!(
+        "Detected PlayStation 4 Content\n========================================================"
+    );
+    println!(
+        "Game title: {}\nTitle ID: {}",
+        base_meta.title, base_meta.title_id
+    );
+    println!(
+        "Base Game Found: {} (v{})",
+        display_source_name(&base_group.sources[0]),
+        base_meta.version
+    );
+    println!(
+        "DLC Found Alongside Base Game: {} item(s)",
+        dlc_group.sources.len()
+    );
+    for source in &dlc_group.sources {
+        let title = ps4_payload_sfo(source)
+            .and_then(|sfo| iso2god::forge::FormatDetector::read_sfo_key(&sfo, "TITLE"))
+            .unwrap_or_else(|| display_source_name(source));
+        println!("  - {title}");
     }
     if classified.itemzflow.is_some() {
         let payload_sources: Vec<PathBuf> = classified
@@ -1459,32 +1505,6 @@ fn run_ps4_ingest_flow(
             );
             log.info("Large-game advisory shown: source payload exceeds 50 GB; external storage remains allowed")?;
         }
-    }
-    println!();
-    println!("Components:");
-    if !classified.base_sources.is_empty() {
-        let base_summary = if let Some(ref v) = classified.base_version {
-            format!(
-                "{} (v{})",
-                display_source_name(&classified.base_sources[0]),
-                v
-            )
-        } else {
-            display_source_name(&classified.base_sources[0])
-        };
-        println!("  Base Game:\n    {base_summary}");
-    }
-    if !classified.update_sources.is_empty() {
-        let update_summary = if let Some(ref v) = classified.update_version {
-            format!(
-                "{} (v{})",
-                display_source_name(&classified.update_sources[0]),
-                v
-            )
-        } else {
-            display_source_name(&classified.update_sources[0])
-        };
-        println!("  Update:\n    {update_summary}");
     }
     if let Some(evidence) = &classified.itemzflow {
         println!("\nSource type: Itemzflow Dump");
@@ -1527,33 +1547,56 @@ fn run_ps4_ingest_flow(
     }
     println!();
 
-    let base_group = build_content_group_from_sources("Base Game", &classified.base_sources)?;
-    let mut update_group = build_content_group_from_sources("Update", &classified.update_sources)?;
-    let dlc_group = build_content_group_from_sources("DLC", &classified.dlc_sources)?;
-
-    // The update catalogue and choice belong immediately after firmware and
-    // game identification. Keep this ahead of target selection so the user
-    // sees the updates for this CUSA and firmware before unrelated choices.
     let update_selection_completed =
         update_group.sources.is_empty() && !base_group.sources.is_empty();
+    let mut update_workspace = None;
     if update_selection_completed {
-        let tool = find_orbis_pkg_tool().context(
-            "Digital Forge could not find its managed OrbisPkgTool runtime to inspect the PS4 game",
-        )?;
-        let base_meta =
-            read_ps4_source_metadata_for_update_selection(&base_group, classified, &tool)?;
-        let progress = Arc::new(Ps4PackageProgress::default());
-        let selected = discover_and_download_ps4_update(
-            &base_meta,
-            firmware.clone(),
-            &app_settings::config_dir()?.join("ps4-update-cache"),
-            &tool,
-            &progress,
-            Arc::new(AtomicBool::new(false)),
-            log,
-        )?;
-        if let Some(package) = selected {
-            update_group = build_content_group_from_sources("Update", &[package])?;
+        loop {
+            let progress = Arc::new(Ps4PackageProgress::default());
+            let selected = discover_and_download_ps4_update(
+                &base_meta,
+                firmware.clone(),
+                &app_settings::config_dir()?.join("ps4-update-cache"),
+                &tool,
+                &progress,
+                Arc::new(AtomicBool::new(false)),
+                log,
+            )?;
+            let Some(package) = selected else { break };
+            let workspace = iso2god::forge::TempWorkspace::new("shadpkg_selected_update")?;
+            let folder = workspace.root.join("Update");
+            println!("Preparing the selected update with ShadPKG before continuing...");
+            if let Err(error) = run_shadpkg_extract(&tool, &package, &folder, &workspace.root) {
+                log.info(&format!("ShadPKG update preparation failed: {error:#}"))?;
+                println!(
+                    "Update download verified, but ShadPKG could not prepare its game payload: {error:#}"
+                );
+                println!(
+                    "No update has been applied. Verified package retained: {}",
+                    package.display()
+                );
+                drop(workspace);
+                let retry = loop {
+                    let choice = prompt_terminal_text(
+                        "R: select again | 0: continue without update | C: cancel",
+                        None,
+                        false,
+                    )?;
+                    match choice.as_deref().map(str::trim) {
+                        Some(value) if value.eq_ignore_ascii_case("r") => break true,
+                        Some("0") => break false,
+                        None => bail!("update preparation cancelled"),
+                        Some(value) if value.eq_ignore_ascii_case("c") => {
+                            bail!("update preparation cancelled")
+                        }
+                        _ => println!("Enter R, 0 or C."),
+                    }
+                };
+                if retry { continue } else { break }
+            }
+            update_group = build_content_group_from_sources("Update", &[folder])?;
+            update_workspace = Some(workspace);
+            break;
         }
     }
 
@@ -1592,6 +1635,7 @@ fn run_ps4_ingest_flow(
         update_selection_completed,
         log,
     );
+    drop(update_workspace);
     if result.is_ok() {
         offer_successful_test_log(classified.title_id.as_deref(), log)?;
         pause_to_continue()?;
@@ -3186,7 +3230,7 @@ fn run_ps4_package_groups_flow(
 
         if base_payload.is_file() {
             println!("Extracting PKG/PFS files into the loose-game workspace...");
-            run_orbis_extract_and_restructure(&tool, &base_payload, &base_stage, &job_ws.tmp)?;
+            run_shadpkg_extract(&tool, &base_payload, &base_stage, &job_ws.tmp)?;
             let _ = remove_dir_all_robust(&base_extracted_dir);
         } else {
             copy_dir_recursive_merge(&base_payload, &base_stage)?;
@@ -3240,12 +3284,7 @@ fn run_ps4_package_groups_flow(
 
                 let upd_payload = extract_or_resolve_payload(upd_src, &upd_ext, cancelled.clone())?;
                 if upd_payload.is_file() {
-                    run_orbis_extract_and_restructure(
-                        &tool,
-                        &upd_payload,
-                        &upd_stage,
-                        &job_ws.tmp,
-                    )?;
+                    run_shadpkg_extract(&tool, &upd_payload, &upd_stage, &job_ws.tmp)?;
                 } else {
                     copy_dir_recursive_merge(&upd_payload, &upd_stage)?;
                     let _ = Command::new(&tool)
@@ -3301,12 +3340,7 @@ fn run_ps4_package_groups_flow(
 
                 let dlc_payload = extract_or_resolve_payload(dlc_src, &dlc_ext, cancelled.clone())?;
                 if dlc_payload.is_file() {
-                    run_orbis_extract_and_restructure(
-                        &tool,
-                        &dlc_payload,
-                        &dlc_stage,
-                        &job_ws.tmp,
-                    )?;
+                    run_shadpkg_extract(&tool, &dlc_payload, &dlc_stage, &job_ws.tmp)?;
                 } else {
                     copy_dir_recursive_merge(&dlc_payload, &dlc_stage)?;
                     let _ = Command::new(&tool)
@@ -3442,7 +3476,7 @@ fn run_ps4_package_groups_flow(
         package_progress.render(0, "Base game", "Preparing source");
         let base_ext = job_ws.root.join("base_pkg_ext");
         fs::create_dir_all(&base_ext)?;
-        let base_payload = extract_or_resolve_payload_with_progress(
+        let base_payload = resolve_ps4_payload_with_progress(
             &raw_base_source,
             &base_ext,
             cancelled.clone(),
@@ -3452,6 +3486,7 @@ fn run_ps4_package_groups_flow(
                 18,
                 "Extracting base game",
             )),
+            target_format != iso2god::forge::TargetFormat::Ps4RetailPkg,
         )?;
         package_progress.render(18, "Base game", "Extraction complete");
 
@@ -3661,23 +3696,29 @@ fn run_ps4_package_groups_flow(
                 // Image0/sce_sys, so never run it on the user's extraction.
                 let upd_stage = job_ws.root.join("upd_stage");
                 copy_dir_recursive_merge(&upd_payload, &upd_stage)?;
-                let restructure = Command::new(&tool)
-                    .arg("restructure")
-                    .arg(&upd_stage)
-                    .env("TEMP", &job_ws.tmp)
-                    .env("TMP", &job_ws.tmp)
-                    .output()?;
-                ensure!(
-                    restructure.status.success(),
-                    "PS4 update staging failed: {}{}",
-                    String::from_utf8_lossy(&restructure.stdout),
-                    String::from_utf8_lossy(&restructure.stderr)
-                );
-                let patch_source = upd_stage.join("Image0");
+                if !upd_stage.join("sce_sys/param.sfo").is_file() {
+                    let restructure = Command::new(&tool)
+                        .arg("restructure")
+                        .arg(&upd_stage)
+                        .env("TEMP", &job_ws.tmp)
+                        .env("TMP", &job_ws.tmp)
+                        .output()?;
+                    ensure!(
+                        restructure.status.success(),
+                        "PS4 update staging failed: {}{}",
+                        String::from_utf8_lossy(&restructure.stdout),
+                        String::from_utf8_lossy(&restructure.stderr)
+                    );
+                }
+                let patch_source = if upd_stage.join("sce_sys/param.sfo").is_file() {
+                    upd_stage.clone()
+                } else {
+                    upd_stage.join("Image0")
+                };
                 ensure!(
                     patch_source.is_dir()
                         && patch_source.join("sce_sys").join("param.sfo").is_file(),
-                    "PS4 update staging lacks Image0/sce_sys/param.sfo after restructure: {}",
+                    "PS4 update staging lacks sce_sys/param.sfo: {}",
                     upd_stage.display()
                 );
                 let out_pkg = job_ws.root.join("upd_built.pkg");
@@ -3995,8 +4036,18 @@ fn extract_or_resolve_payload_with_progress(
     cancelled: Arc<AtomicBool>,
     progress: Option<iso2god::forge::archive::ArchiveProgress>,
 ) -> Result<PathBuf, Error> {
+    resolve_ps4_payload_with_progress(source, dest_dir, cancelled, progress, true)
+}
+
+fn resolve_ps4_payload_with_progress(
+    source: &Path,
+    dest_dir: &Path,
+    cancelled: Arc<AtomicBool>,
+    progress: Option<iso2god::forge::archive::ArchiveProgress>,
+    extract_pkg: bool,
+) -> Result<PathBuf, Error> {
     let archive_kind = iso2god::forge::archive::ArchiveEngine::classify(source);
-    match archive_kind {
+    let resolved = match archive_kind {
         iso2god::forge::archive::ArchiveKind::SingleVolume(_)
         | iso2god::forge::archive::ArchiveKind::MultiVolume { .. } => {
             if progress.is_none() {
@@ -4028,9 +4079,29 @@ fn extract_or_resolve_payload_with_progress(
                     Err(error) => return Err(error),
                 }
             };
-            Ok(find_payload_pkg_or_dir(&extracted))
+            find_payload_pkg_or_dir(&extracted)
         }
-        _ => Ok(source.to_path_buf()),
+        _ => source.to_path_buf(),
+    };
+    if extract_pkg
+        && resolved.is_file()
+        && resolved
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pkg"))
+    {
+        let target = dest_dir.join("prepared");
+        let report =
+            iso2god::forge::shadpkg::extract_package(&resolved, &target, cancelled, |event| {
+                if let Some(callback) = &progress {
+                    callback(
+                        event.percent,
+                        event.details.as_deref().unwrap_or(&event.stage),
+                    );
+                }
+            })?;
+        Ok(report.output_path)
+    } else {
+        Ok(resolved)
     }
 }
 
@@ -4062,47 +4133,35 @@ fn find_pkgs_recursive(dir: &Path, pkgs: &mut Vec<PathBuf>, depth: usize, max_de
     }
 }
 
-fn run_orbis_extract_and_restructure(
-    tool: &Path,
+fn run_shadpkg_extract(
+    _tool: &Path,
     pkg_path: &Path,
     target_dir: &Path,
-    tmp_dir: &Path,
+    _tmp_dir: &Path,
 ) -> Result<(), Error> {
-    fs::create_dir_all(target_dir)?;
-    let status = Command::new(tool)
-        .arg("extract")
-        .arg(pkg_path)
-        .arg(target_dir)
-        .env("TEMP", tmp_dir)
-        .env("TMP", tmp_dir)
-        .status()
-        .with_context(|| {
-            format!(
-                "could not execute OrbisPkgTool extract on {}",
-                pkg_path.display()
-            )
-        })?;
-    if !status.success() {
-        bail!("OrbisPkgTool extract failed for {}", pkg_path.display());
-    }
-    let restructure = Command::new(tool)
-        .arg("restructure")
-        .arg(target_dir)
-        .env("TEMP", tmp_dir)
-        .env("TMP", tmp_dir)
-        .status()
-        .with_context(|| {
-            format!(
-                "could not execute OrbisPkgTool restructure on {}",
-                target_dir.display()
-            )
-        })?;
-    if !restructure.success() {
-        bail!(
-            "OrbisPkgTool restructure failed for {}",
-            target_dir.display()
-        );
-    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel_input = cancelled.clone();
+    println!("Extracting with managed ShadPKG 2.1.0 (Alt+C to cancel)...");
+    let report = iso2god::forge::shadpkg::extract_package(
+        pkg_path,
+        target_dir,
+        cancelled,
+        |event| {
+            if poll(Duration::from_millis(1)).unwrap_or(false)
+                && matches!(read(), Ok(Event::Key(key)) if key.kind == KeyEventKind::Press && key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('c'))
+            {
+                cancel_input.store(true, Ordering::Relaxed);
+            }
+            println!("{}: {}", event.stage, event.details.unwrap_or_default());
+        },
+    )?;
+    println!(
+        "Prepared {} v{}: {} payload files, {} bytes.",
+        report.identity.title_id,
+        report.identity.version,
+        report.payload_files,
+        report.payload_bytes
+    );
     Ok(())
 }
 
@@ -4858,23 +4917,19 @@ mod ps4_package_progress_tests {
         assert_eq!(metadata.package_type, "Dlc");
         assert!(output.is_file());
         let extracted = root.join("dlc_recovered");
-        let extraction = Command::new(&tool)
-            .arg("extract")
-            .arg(&output)
-            .arg(&extracted)
-            .output()
-            .unwrap();
-        assert!(
-            extraction.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&extraction.stdout),
-            String::from_utf8_lossy(&extraction.stderr)
-        );
+        let extraction = iso2god::forge::shadpkg::extract_package(
+            &output,
+            &extracted,
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        )
+        .unwrap();
+        assert!(extraction.payload_files > 0);
         assert_eq!(
-            fs::read(extracted.join("Image0/dlc_content.dat")).unwrap(),
+            fs::read(extracted.join("dlc_content.dat")).unwrap(),
             b"synthetic DLC content fixture"
         );
-        let extracted_sfo = extracted.join("Sc0/param.sfo");
+        let extracted_sfo = extracted.join("sce_sys/param.sfo");
         assert_eq!(
             iso2god::forge::FormatDetector::read_sfo_key(&extracted_sfo, "TITLE_ID").as_deref(),
             Some("CUSA00001")
@@ -5504,6 +5559,9 @@ fn discover_and_download_ps4_update(
     };
     updates.retain(|update| {
         update.title_id.eq_ignore_ascii_case(title_id)
+            && update.content_id.as_ref().is_none_or(|id| {
+                base.content_id.is_empty() || id.eq_ignore_ascii_case(&base.content_id)
+            })
             && (base.version.is_empty()
                 || iso2god::forge::ps4_updates::compare_update_versions(
                     &update.version,
@@ -5618,6 +5676,7 @@ Update versions for {} ({title_id}) — base version {}, console firmware {firmw
     let package = iso2god::forge::ps4_updates::update_package(&update)?;
     progress.render(44, "Update download", "Downloading official update package");
     let download_started = Instant::now();
+    let mut last_download_render = download_started - Duration::from_secs(1);
     let download_cancelled = cancelled.clone();
     let path = iso2god::forge::ps4_updates::download_update(
         &update,
@@ -5630,6 +5689,10 @@ Update versions for {} ({title_id}) — base version {}, console firmware {firmw
             {
                 download_cancelled.store(true, Ordering::Relaxed);
             }
+            if last_download_render.elapsed() < Duration::from_millis(250) && total != Some(bytes) {
+                return;
+            }
+            last_download_render = Instant::now();
             let percent = total
                 .filter(|total| *total > 0)
                 .map(|total| {
@@ -7617,13 +7680,23 @@ mod manual_import_tests {
     }
 
     fn synthetic_sfo_for_title(category: &[u8], version: &[u8], title_id: &str) -> Vec<u8> {
+        synthetic_sfo_named(category, version, title_id, "Synthetic Game")
+    }
+
+    fn synthetic_sfo_named(
+        category: &[u8],
+        version: &[u8],
+        title_id: &str,
+        title: &str,
+    ) -> Vec<u8> {
         let content_id = format!("EP0001-{title_id}_00-TESTTITLE00000000\0");
         let title_id_value = format!("{title_id}\0");
+        let title_value = format!("{title}\0");
         let entries: Vec<(&str, &[u8])> = vec![
             ("APP_VER", version),
             ("CATEGORY", category),
             ("CONTENT_ID", content_id.as_bytes()),
-            ("TITLE", b"Synthetic Game\0"),
+            ("TITLE", title_value.as_bytes()),
             ("TITLE_ID", title_id_value.as_bytes()),
         ];
         let mut keys = Vec::new();
@@ -7658,6 +7731,54 @@ mod manual_import_tests {
         output.extend(keys);
         output.extend(values);
         output
+    }
+
+    #[test]
+    fn prepared_base_title_and_eleven_sibling_dlcs_survive_extractor_integration() {
+        let workspace = iso2god::forge::TempWorkspace::new("shadpkg_prepared_layout").unwrap();
+        let game = workspace.root.join("GAME");
+        fs::create_dir_all(game.join("sce_sys")).unwrap();
+        fs::write(
+            game.join("sce_sys/param.sfo"),
+            synthetic_sfo_named(b"gd", b"01.00", "CUSA05986", "Need for Speed Payback"),
+        )
+        .unwrap();
+        fs::write(game.join("eboot.bin"), b"synthetic executable").unwrap();
+        fs::create_dir_all(game.join("Data")).unwrap();
+        fs::write(game.join("Data/payload.bin"), b"synthetic game payload").unwrap();
+        fs::write(game.join("payload.dat"), b"synthetic root payload").unwrap();
+        let dlc = workspace.root.join("DLC");
+        for index in 0..11 {
+            let addon = dlc.join(format!("Addon-{index}")).join("Image0/sce_sys");
+            fs::create_dir_all(&addon).unwrap();
+            fs::write(
+                addon.join("param.sfo"),
+                synthetic_sfo_named(b"ac", b"01.00", "CUSA05986", &format!("DLC {index}")),
+            )
+            .unwrap();
+        }
+        fs::write(dlc.join("EXTRACTION-REPORT.txt"), b"sidecar, not a game").unwrap();
+        for input in [&workspace.root, &game] {
+            let classified = classify_source_set(&[input.clone()]).unwrap();
+            assert_eq!(classified.base_sources, vec![game.clone()]);
+            let base =
+                build_content_group_from_sources("Base Game", &classified.base_sources).unwrap();
+            let metadata = read_ps4_source_metadata_for_update_selection(
+                &base,
+                &classified,
+                Path::new("unused-for-folder"),
+            )
+            .unwrap();
+            assert_eq!(metadata.title, "Need for Speed Payback");
+            assert_eq!(metadata.title_id, "CUSA05986");
+            assert_eq!(
+                build_content_group_from_sources("DLC", &classified.dlc_sources)
+                    .unwrap()
+                    .sources
+                    .len(),
+                11
+            );
+        }
     }
 
     #[test]

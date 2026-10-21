@@ -785,295 +785,37 @@ fn run_pkgtool(
     title_id: Option<&str>,
 ) -> Result<Execution, Error> {
     if target == TargetFormat::Ps4FakePkg || target == TargetFormat::Ps4RetailPkg {
-        Ok(local_execution(
+        return Ok(local_execution(
             source.to_path_buf(),
             Vec::new(),
             "built-in PS4 PKG validation",
-        ))
-    } else {
-        let folder_name = if let Some(id) = title_id {
-            id.to_string()
-        } else {
-            let mut name = "game".to_string();
-            if let Ok(mut f) = File::open(source) {
-                let mut hdr = [0u8; 4096];
-                if let Ok(n) = f.read(&mut hdr) {
-                    if let Some(cid) = crate::forge::detector::parse_pkg_content_id(&hdr[..n]) {
-                        if let Some(tid) = crate::forge::detector::title_id_from_content_id(&cid) {
-                            name = tid;
-                        }
-                    }
-                }
-            }
-            if name == "game" {
-                if let Some(stem) = source.file_stem().and_then(OsStr::to_str) {
-                    name = stem.to_string();
-                }
-            }
-            name
-        };
-
-        let folder = output_dir.join(&folder_name);
-        fs::create_dir_all(&folder)?;
-
-        let tool = find_native_orbis_pkg_tool()
-            .or_else(|| {
-                find_tool(
-                    "PKGTOOL",
-                    &["OrbisPkgTool", "orbis-pkg-tool", "PkgTool", "pkgtool"],
-                )
-            })
-            .context("neither OrbisPkgTool nor PkgTool was found")?;
-
-        let is_orbis_pkg_tool = tool
-            .file_name()
-            .and_then(OsStr::to_str)
-            .is_some_and(|name| name.to_ascii_lowercase().contains("orbispkgtool"));
-
-        let exec = if is_orbis_pkg_tool {
-            let mut cmd = Command::new(&tool);
-            cmd.arg("extract");
-            cmd.arg("--verbose");
-            cmd.arg(source);
-            cmd.arg(&folder);
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-
-            let mut child = cmd
-                .spawn()
-                .with_context(|| format!("failed to launch {}", tool.display()))?;
-            let stdout = child.stdout.take().context("missing stdout")?;
-            let stderr = child.stderr.take().context("missing stderr")?;
-
-            let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
-            let stderr_handle = std::thread::spawn(move || {
-                let mut reader = BufReader::new(stderr);
-                let mut err_text = String::new();
-                let mut line = String::new();
-                while let Ok(n) = reader.read_line(&mut line) {
-                    if n == 0 {
-                        break;
-                    }
-                    err_text.push_str(&line);
-                    line.clear();
-                }
-                let _ = stderr_tx.send(err_text);
-            });
-
-            let mut reader = BufReader::new(stdout);
-            let mut stdout_text = String::new();
-            let mut record = Vec::new();
-
-            loop {
-                if cancelled.load(Ordering::Relaxed) {
-                    let _ = child.kill();
-                    bail!("conversion cancelled");
-                }
-                record.clear();
-                let count = match reader.read_until(b'\r', &mut record) {
-                    Ok(c) => c,
-                    Err(_) => break,
-                };
-                if count == 0 {
-                    break;
-                }
-                let line_text = String::from_utf8_lossy(&record);
-                let trimmed = line_text.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                stdout_text.push_str(trimmed);
-                stdout_text.push('\n');
-
-                let pct = if let Some(open) = trimmed.find('[') {
-                    if let Some(pct_pos) = trimmed[open..].find('%') {
-                        let num_str = trimmed[open + 1..open + pct_pos].trim();
-                        num_str.parse::<u8>().ok()
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                let display_detail = if let Some(close) = trimmed.find(']') {
-                    let after = trimmed[close + 1..].trim();
-                    after.strip_prefix("Extracting ").unwrap_or(after).trim()
-                } else {
-                    trimmed
-                };
-
-                let reported_pct = if let Some(p) = pct {
-                    (2 + (p as f32 * 0.93) as u8).min(95)
-                } else {
-                    5
-                };
-
-                progress(ProgressUpdate {
-                    stage: "Extracting PKG files".to_string(),
-                    percent: reported_pct,
-                    details: Some(display_detail.to_string()),
-                    bytes_processed: 0,
-                    total_bytes: 0,
-                });
-            }
-
-            let status = child.wait()?;
-            let _ = stderr_handle.join();
-            let stderr_text = stderr_rx.recv().unwrap_or_default();
-
-            ensure!(
-                status.success(),
-                "OrbisPkgTool extract failed with exit code {:?}:\n{}",
-                status.code(),
-                stderr_text.trim()
-            );
-
-            progress(ProgressUpdate {
-                stage: "Restructuring PS4 game layout".to_string(),
-                percent: 96,
-                details: None,
-                bytes_processed: 0,
-                total_bytes: 0,
-            });
-
-            let _ = Command::new(&tool).arg("restructure").arg(&folder).output();
-
-            // Flatten Image0 if present so game assets (eboot.bin, sce_sys, data, etc.) are at folder root
-            let image0 = folder.join("Image0");
-            if image0.is_dir() {
-                if let Ok(entries) = fs::read_dir(&image0) {
-                    for entry in entries.flatten() {
-                        let target_path = folder.join(entry.file_name());
-                        if !target_path.exists() {
-                            let _ = fs::rename(entry.path(), &target_path);
-                        } else if entry.path().is_dir() && target_path.is_dir() {
-                            if let Ok(sub_entries) = fs::read_dir(entry.path()) {
-                                for sub_entry in sub_entries.flatten() {
-                                    let sub_target = target_path.join(sub_entry.file_name());
-                                    if !sub_target.exists() {
-                                        let _ = fs::rename(sub_entry.path(), &sub_target);
-                                    }
-                                }
-                            }
-                            let _ = fs::remove_dir_all(entry.path());
-                        }
-                    }
-                }
-                let _ = fs::remove_dir_all(&image0);
-            }
-            let sc0 = folder.join("Sc0");
-            if sc0.is_dir() {
-                let sce_sys = folder.join("sce_sys");
-                let _ = fs::create_dir_all(&sce_sys);
-                if let Ok(entries) = fs::read_dir(&sc0) {
-                    for entry in entries.flatten() {
-                        let target_path = sce_sys.join(entry.file_name());
-                        if !target_path.exists() {
-                            let _ = fs::rename(entry.path(), &target_path);
-                        } else if entry.path().is_dir() && target_path.is_dir() {
-                            if let Ok(sub_entries) = fs::read_dir(entry.path()) {
-                                for sub_entry in sub_entries.flatten() {
-                                    let sub_target = target_path.join(sub_entry.file_name());
-                                    if !sub_target.exists() {
-                                        let _ = fs::rename(sub_entry.path(), &sub_target);
-                                    }
-                                }
-                            }
-                            let _ = fs::remove_dir_all(entry.path());
-                        }
-                    }
-                }
-                let _ = fs::remove_dir_all(sc0);
-            }
-
-            // If real Title ID was detected in SFO, ensure the final directory is named after it
-            let final_folder = {
-                let sfo_path = folder.join("sce_sys").join("param.sfo");
-                if sfo_path.is_file() {
-                    let (sfo_title_id, _) =
-                        crate::forge::detector::FormatDetector::read_sfo(&sfo_path);
-                    if let Some(id) = sfo_title_id {
-                        if !id.is_empty() && id != folder_name {
-                            let new_path = output_dir.join(&id);
-                            if !new_path.exists() && fs::rename(&folder, &new_path).is_ok() {
-                                new_path
-                            } else {
-                                folder
-                            }
-                        } else {
-                            folder
-                        }
-                    } else {
-                        folder
-                    }
-                } else {
-                    folder
-                }
-            };
-
-            Execution {
-                output_path: final_folder.clone(),
-                aux_files: Vec::new(),
-                command: vec![
-                    tool.display().to_string(),
-                    "extract".to_string(),
-                    source.display().to_string(),
-                    final_folder.display().to_string(),
-                ],
-                stdout: stdout_text,
-                stderr: stderr_text,
-                exit_code: status.code(),
-                tool_version: Some("OrbisPkgTool".to_string()),
-            }
-        } else {
-            let gp4 = folder.join("package.gp4");
-            let outer = folder.join("outer.pfs.dat");
-            let inner = folder.join("inner.pfs.dat");
-            let first = run_tool(
-                "PKGTOOL",
-                &["PkgTool", "pkgtool"],
-                [
-                    os("pkg_makegp4"),
-                    source.as_os_str().to_owned(),
-                    folder.as_os_str().to_owned(),
-                ],
-                gp4.clone(),
-                vec![outer.clone(), inner.clone()],
-            )?;
-            run_tool(
-                "PKGTOOL",
-                &["PkgTool", "pkgtool"],
-                [
-                    os("pkg_extractouterpfs"),
-                    source.as_os_str().to_owned(),
-                    outer.as_os_str().to_owned(),
-                ],
-                outer.clone(),
-                Vec::new(),
-            )?;
-            run_tool(
-                "PKGTOOL",
-                &["PkgTool", "pkgtool"],
-                [
-                    os("pkg_extractinnerpfs"),
-                    source.as_os_str().to_owned(),
-                    inner.as_os_str().to_owned(),
-                ],
-                inner,
-                Vec::new(),
-            )
-            .with_context(
-                || "LibOrbisPkg could not extract inner PFS; a package passcode may be required",
-            )?;
-            Execution {
-                output_path: folder,
-                aux_files: vec![gp4, outer],
-                ..first
-            }
-        };
-        Ok(exec)
+        ));
     }
+    let identity = crate::forge::shadpkg::inspect_package(source)?;
+    if let Some(expected) = title_id {
+        ensure!(
+            expected.eq_ignore_ascii_case(&identity.title_id),
+            "selected game ID does not match embedded package identity"
+        );
+    }
+    let folder = output_dir.join(&identity.content_id);
+    let report = crate::forge::shadpkg::extract_package(source, &folder, cancelled, |event| {
+        progress(event)
+    })?;
+    Ok(Execution {
+        output_path: report.output_path,
+        aux_files: Vec::new(),
+        command: vec![
+            "ShadPKG".into(),
+            "extract".into(),
+            source.display().to_string(),
+            folder.display().to_string(),
+        ],
+        stdout: report.diagnostics,
+        stderr: String::new(),
+        exit_code: Some(0),
+        tool_version: Some("ShadPKG 2.1.0".into()),
+    })
 }
 
 fn run_pkgtool_build_fpkg(
