@@ -5,6 +5,12 @@ Full upstream licence and corresponding tagged source archive accompany the
 executable in runtime/ps4/ShadPKG (source tree: consoles/PlayStation/FPKG/tools/ShadPKG).
 Microsoft Visual C++ runtime DLLs are distributed under Microsoft's terms.
 
+Component: orbis-pkg 0.1.0 (published keysets used for extraction capability checks)
+Project: https://github.com/videobitva/orbis
+Licence: MIT OR Apache-2.0, as declared by the upstream crate.
+RSA decoding uses RustCrypto rsa; AES/CBC uses RustCrypto aes and cbc.
+No successful decryption of official retail update payloads is implied.
+
 Component: self_update v1.2.0
 Project: https://github.com/jaemk/self_update
 Licence: MIT
