@@ -1651,11 +1651,13 @@ dependencies = [
  "mega",
  "num_enum",
  "openssl",
+ "orbis-pkg",
  "quick-xml",
  "rayon",
  "reqwest 0.12.15",
  "rfd",
  "rpassword",
+ "rsa",
  "self_update",
  "serde",
  "serde-aux",
@@ -2134,6 +2136,22 @@ dependencies = [
  "openssl-src",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "orbis-pkg"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94b10a91aec999f9f245684bfed122483b9f6921fa453e688e17d5c0f300d138"
+dependencies = [
+ "aes",
+ "bitflags",
+ "byteorder",
+ "cbc",
+ "rsa",
+ "sha2 0.10.9",
+ "snafu",
+ "zerocopy",
 ]
 
 [[package]]
@@ -3191,6 +3209,27 @@ name = "smallvec"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7fcf8323ef1faaee30a44a340193b1ac6814fd9b7b4e88e9d4519a3e4abe1cfd"
+
+[[package]]
+name = "snafu"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e84b3f4eacbf3a1ce05eac6763b4d629d60cbc94d632e4092c54ade71f1e1a2"
+dependencies = [
+ "snafu-derive",
+]
+
+[[package]]
+name = "snafu-derive"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
+]
 
 [[package]]
 name = "socket2"

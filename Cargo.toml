@@ -21,6 +21,10 @@ deferred-console-integration-tests = []
 
 [dependencies]
 anyhow = { version = "1.0.97", features = ["backtrace"] }
+aes = "0.8"
+cbc = "0.1"
+orbis-pkg = "=0.1.0"
+rsa = "0.9.10"
 bitflags = "2.9.0"
 base64 = "0.22"
 byteorder = "1.5.0"
@@ -52,8 +56,6 @@ openssl = { version = "0.10", features = ["vendored"] }
 self_update = { version = "1.2.0", default-features = false, features = ["ureq", "rustls", "github", "checksums"] }
 
 [dev-dependencies]
-aes = "0.8"
-cbc = "0.1"
 ctr = "0.9"
 reqwest = { version = "0.12.15", features = ["blocking", "json"] }
 serde-aux = "4.6.0"

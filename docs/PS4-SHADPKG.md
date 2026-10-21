@@ -46,11 +46,50 @@ Both failures occurred through Digital Forge's actual interface. No usable
 decrypted update payload or real-game update FPKG was produced. The verified
 download was retained. This integration does **not** fix retail-update decryption.
 
-The upstream v2.1.0 source has unchecked PFS/PFSC parsing after key recovery;
-the crash alone does not establish which cryptographic or parser assumption
-failed. Its RIF-assisted extraction path is marked TODO, so passing a license
-file is not represented as a tested workaround. No TLS or integrity check is
-disabled to work around extraction failures.
+## Crash investigation and capability check (22 October 2026)
+
+Read-only inspection of this exact cached update established:
+
+- Its metadata key (DK3) passes RSA PKCS#1 v1.5 decoding and its recorded digest.
+- Its AES-unwrapped IMAGE_KEY fails RSA PKCS#1 v1.5 decoding with the fake-package
+  key that ShadPKG uses. No valid filesystem key (EKPFS) was recovered.
+- The standard zero passcode also fails the package's recorded key digest.
+
+ShadPKG 2.1.0's `Crypto::RSA2048Decrypt` discards `DecodingResult` and copies the
+output even after an invalid decode. Its `GetPFSCOffset` returns unsigned -1
+when no PFSC header is found, then the caller uses that offset in an unchecked
+`memcpy`. These are concrete memory-safety defects on the invalid-key path;
+the actual package's failed key decode is independently confirmed. This was
+not established by a debugger stack trace, so the precise faulting instruction
+in the release binary is not asserted.
+
+Digital Forge now reads only bounded key records before launching ShadPKG,
+validates RSA padding, decoded lengths and stored key digests, and refuses to
+start that parser when key recovery fails. The `orbis-pkg` crate supplies the
+same published metadata and fake-package keysets. No private retail keys,
+guessed passcodes or disabled integrity checks are introduced. This guard
+prevents this invalid-key crash path; it does **not** decrypt the retail update.
+
+Alternative backend evaluation:
+
+- `Mohamed-Moslem-Allouch/ps4-pkg-unpacker`, commit
+  `1fa6ecc0547ff2d24d7b5773b31a14866a924625`, was run against the same real PKG
+  in an isolated research folder. It extracted 42 files, all under `sce_sys`,
+  and no game payload. Its exit code was zero despite the missing payload.
+  It explicitly requests a valid passcode for retail filesystem decryption.
+  It was **not** integrated as a working replacement.
+- `maxton/LibOrbisPkg`, commit `643477263b2644e0803e0f58b8726ea4e3f3b7d4`,
+  was source-reviewed: `GetEkpfs` uses the same fake key, returning null when
+  decryption fails; other paths require a matching passcode/key. Existing
+  OrbisPkgTool had already produced metadata only on this update.
+- Current ShadPKG source `7a02c1e56b40477b26a660884deda1f3ca8d2eab` still
+  uses `FakeKeyset`, ignores the RSA decoding result and retains unchecked
+  PFSC offset handling in its scan path. RIF-assisted extraction remains TODO.
+
+No evaluated PC backend recovered the actual update filesystem with the
+available inputs. A valid matching package key/passcode or an already decrypted
+update is still required. The successful catalogue/download tests and synthetic
+package tests must not be reported as successful real-update decryption.
 
 Sources: [official release](https://github.com/seregonwar/ShadPKG/releases/tag/v2.1.0),
 [extractor source](https://github.com/seregonwar/ShadPKG/blob/v2.1.0/core/file_format/pkg.cpp),

@@ -242,6 +242,7 @@ pub fn extract_package(
     ensure!(source.is_file(), "PS4 source package is missing");
     let source = std::path::absolute(source)?;
     let identity = inspect_package(&source)?;
+    super::ps4_extraction_keys::validate_package(&source, identity.no_data_addon)?;
     let tool = find_tool()?;
     ensure!(
         !destination.exists()
