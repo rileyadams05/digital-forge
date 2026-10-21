@@ -13,6 +13,7 @@ pub mod profile;
 pub mod ps4;
 pub mod ps4_updates;
 pub mod ps5;
+pub mod shadpkg;
 pub mod transfer;
 pub mod ui;
 

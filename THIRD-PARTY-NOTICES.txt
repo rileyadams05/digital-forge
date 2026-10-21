@@ -1,3 +1,10 @@
+Component: ShadPKG v2.1.0 (managed standalone Windows x64 executable)
+Project: https://github.com/seregonwar/ShadPKG/releases/tag/v2.1.0
+Licence: upstream GNU LGPL text, version 2.1 (README labels LGPL-2.0-or-later).
+Full upstream licence and corresponding tagged source archive accompany the
+executable in runtime/ps4/ShadPKG (source tree: consoles/PlayStation/FPKG/tools/ShadPKG).
+Microsoft Visual C++ runtime DLLs are distributed under Microsoft's terms.
+
 Component: self_update v1.2.0
 Project: https://github.com/jaemk/self_update
 Licence: MIT

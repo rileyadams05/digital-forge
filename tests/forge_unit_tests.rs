@@ -431,8 +431,8 @@ fn ps4_orbis_pkgtool_backend_builds_and_validates_base_and_update_fpkg() {
         );
         assert!(info_text.contains("CUSA00001"), "{info_text}");
 
-        if label == "base" {
-            let extracted = workspace.root.join("base_extracted");
+        {
+            let extracted = workspace.root.join(format!("{label}_extracted"));
             let pkg_input = detection(
                 Platform::PlayStation4,
                 SourceFormat::Ps4FakePkg,
@@ -446,7 +446,9 @@ fn ps4_orbis_pkgtool_backend_builds_and_validates_base_and_update_fpkg() {
                     Arc::new(|_: ProgressUpdate| {}),
                     Arc::new(AtomicBool::new(false)),
                 )
-                .unwrap_or_else(|error| panic!("synthetic PS4 base extraction failed: {error:#}"));
+                .unwrap_or_else(|error| {
+                    panic!("synthetic PS4 {label} extraction failed: {error:#}")
+                });
             let extracted_sfo = extracted_result.output_path.join("sce_sys/param.sfo");
             assert!(extracted_result.output_path.join("eboot.bin").is_file());
             assert!(extracted_sfo.is_file());
