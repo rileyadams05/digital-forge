@@ -561,6 +561,7 @@ pub fn classify_source_set(sources: &[PathBuf]) -> Result<ClassifiedSourceSet, E
     let mut detected_platform = None;
     let mut global_title_id = None;
     let mut global_title_name = None;
+    let mut base_title_name = None;
     let mut base_version = None;
     let mut update_version = None;
 
@@ -588,6 +589,9 @@ pub fn classify_source_set(sources: &[PathBuf]) -> Result<ClassifiedSourceSet, E
 
         match cand.role {
             ContentRole::BaseGame => {
+                if cand.title_name.is_some() && base_title_name.is_none() {
+                    base_title_name = cand.title_name.clone();
+                }
                 if cand.version.is_some() && base_version.is_none() {
                     base_version = cand.version.clone();
                 }
@@ -638,7 +642,10 @@ pub fn classify_source_set(sources: &[PathBuf]) -> Result<ClassifiedSourceSet, E
     Ok(ClassifiedSourceSet {
         platform,
         title_id: global_title_id,
-        title_name: global_title_name,
+        // DLC SFOs can contain the name of an individual add-on (for
+        // example, a car pack). The base game's SFO is authoritative for the
+        // title shown in the conversion workflow.
+        title_name: base_title_name.or(global_title_name),
         base_sources,
         update_sources,
         dlc_sources,
@@ -3499,9 +3506,10 @@ fn run_ps4_package_groups_flow(
                 .join("Image0")
                 .join("sce_sys")
                 .join("param.sfo");
-            let title_id = iso2god::forge::FormatDetector::read_sfo_key(&root_sfo, "TITLE_ID")
+            let sfo = ps4_payload_sfo(&base_payload).unwrap_or(root_sfo.clone());
+            let title_id = iso2god::forge::FormatDetector::read_sfo_key(&sfo, "TITLE_ID")
                 .or_else(|| iso2god::forge::FormatDetector::read_sfo_key(&image_sfo, "TITLE_ID"));
-            let content_id = iso2god::forge::FormatDetector::read_sfo_content_id(&root_sfo)
+            let content_id = iso2god::forge::FormatDetector::read_sfo_content_id(&sfo)
                 .or_else(|| iso2god::forge::FormatDetector::read_sfo_content_id(&image_sfo))
                 .or_else(|| {
                     title_id
@@ -3534,13 +3542,41 @@ fn run_ps4_package_groups_flow(
                 target_format != iso2god::forge::TargetFormat::Ps4RetailPkg,
                 "A retail PKG cannot be built from a folder without Sony's private signing service; choose FPKG"
             );
+            // Prepared decrypted folders may retain OrbisPkgTool's split Image0 /
+            // Sc0 layout. Normalize a private staging copy when needed so the
+            // user's prepared source is never modified in place.
+            let base_build_payload = if !base_payload.join("sce_sys/param.sfo").is_file() {
+                let stage = job_ws.root.join("base_stage");
+                copy_dir_recursive_merge(&base_payload, &stage)?;
+                let restructure = Command::new(&tool)
+                    .arg("restructure")
+                    .arg(&stage)
+                    .env("TEMP", &job_ws.tmp)
+                    .env("TMP", &job_ws.tmp)
+                    .output()?;
+                ensure!(
+                    restructure.status.success(),
+                    "PS4 base staging failed: {}{}",
+                    String::from_utf8_lossy(&restructure.stdout),
+                    String::from_utf8_lossy(&restructure.stderr)
+                );
+                if stage.join("sce_sys/param.sfo").is_file() {
+                    stage
+                } else {
+                    stage.join("Image0")
+                }
+            } else {
+                base_payload.clone()
+            };
             let out_pkg = job_ws.root.join("base_built.pkg");
             let gp4 = job_ws.root.join("base.gp4");
-            let base_sfo = base_payload.join("sce_sys").join("param.sfo");
+            let base_sfo = ps4_payload_sfo(&base_build_payload)
+                .or_else(|| ps4_payload_sfo(&base_payload))
+                .context("PS4 base staging lacks sce_sys/param.sfo")?;
             let base_title_id = iso2god::forge::FormatDetector::read_sfo_key(&base_sfo, "TITLE_ID")
                 .or_else(|| {
                     iso2god::forge::FormatDetector::read_sfo_key(
-                        &base_payload
+                        &base_build_payload
                             .join("Image0")
                             .join("sce_sys")
                             .join("param.sfo"),
@@ -3551,7 +3587,7 @@ fn run_ps4_package_groups_flow(
             let base_content_id = iso2god::forge::FormatDetector::read_sfo_content_id(&base_sfo)
                 .or_else(|| {
                     iso2god::forge::FormatDetector::read_sfo_content_id(
-                        &base_payload
+                        &base_build_payload
                             .join("Image0")
                             .join("sce_sys")
                             .join("param.sfo"),
@@ -3569,7 +3605,7 @@ fn run_ps4_package_groups_flow(
             package_progress.render(19, "Base game", "Building package");
             let gp4_result = Command::new(&tool)
                 .arg("gp4gen")
-                .arg(&base_payload)
+                .arg(&base_build_payload)
                 .arg("--title-id")
                 .arg(&base_title_id)
                 .arg("--content-id")
@@ -3590,7 +3626,7 @@ fn run_ps4_package_groups_flow(
             let build_result = Command::new(&tool)
                 .arg("build")
                 .arg(&gp4)
-                .arg(&base_payload)
+                .arg(&base_build_payload)
                 .arg("--passcode")
                 .arg(PS4_FPKG_PASSCODE)
                 .arg("--out")
@@ -3827,6 +3863,7 @@ fn run_ps4_package_groups_flow(
 
         // Clean up intermediate packages and build GP4s now that final_pkg exists
         let _ = remove_dir_all_robust(&base_ext);
+        let _ = remove_dir_all_robust(&job_ws.root.join("base_stage"));
         let _ = remove_dir_all_robust(&job_ws.root.join("upd_pkg_ext"));
         let _ = fs::remove_file(job_ws.root.join("base_built.pkg"));
         let _ = fs::remove_file(job_ws.root.join("base.gp4"));
@@ -7760,6 +7797,10 @@ mod manual_import_tests {
         fs::write(dlc.join("EXTRACTION-REPORT.txt"), b"sidecar, not a game").unwrap();
         for input in [&workspace.root, &game] {
             let classified = classify_source_set(&[input.clone()]).unwrap();
+            assert_eq!(
+                classified.title_name.as_deref(),
+                Some("Need for Speed Payback")
+            );
             assert_eq!(classified.base_sources, vec![game.clone()]);
             let base =
                 build_content_group_from_sources("Base Game", &classified.base_sources).unwrap();
@@ -7779,6 +7820,11 @@ mod manual_import_tests {
                 11
             );
         }
+        let dlc_first = classify_source_set(&[dlc.join("Addon-0"), game.clone()]).unwrap();
+        assert_eq!(
+            dlc_first.title_name.as_deref(),
+            Some("Need for Speed Payback")
+        );
     }
 
     #[test]

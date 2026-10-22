@@ -91,6 +91,29 @@ available inputs. A valid matching package key/passcode or an already decrypted
 update is still required. The successful catalogue/download tests and synthetic
 package tests must not be reported as successful real-update decryption.
 
+## Itemzflow update path comparison
+
+Inspection of `LightningMods/Itemzflow` (`main`, 22 October 2026) clarifies why
+Itemzflow's console-side update flow differs from PC package extraction:
+
+1. `itemzflow/source/http.cpp` (`Fetch_Update_Details`): queries `PATCH_API_URL + title_id`
+   and parses `patches[]` entries (`version`, `size`, `endpoint`, optional `required_fw`).
+   Public `include/secrets.h` redacts the private patch API endpoint (`ITS A SECRET`).
+2. `itemzflow/source/GLES2_menu.cpp`: compares each patch's `required_fw` against
+   `ps4_fw_version()` on the console; on PC, Digital Forge takes manual firmware input.
+3. `itemzflow/source/GLES2_itemzflow.cpp`: explicitly rejects its retail update installer
+   option for games flagged as FPKG, and passes selected retail patch endpoints to
+   `installPatchPKG`.
+4. `itemzflow/source/installpkg.cpp` (`installPatchPKG`): queues the retail PKG via PS4
+   system services (`sceBgftServiceIntDebugDownloadRegisterPkg` and
+   `sceBgftServiceDownloadStartTask`) for console-side installation. No PC filesystem
+   decryption occurs in that path.
+5. `itemzflow/source/sig_handler.cpp`: Itemzflow's separate console dumper (`GAME_PATCH`)
+   operates on the PS4 after a patch is installed on compatible hardware. Digital Forge
+   can package a complete console-produced patch dump folder on PC, but cannot reproduce
+   console-side retail installation and dumping from the encrypted retail PKG alone.
+
 Sources: [official release](https://github.com/seregonwar/ShadPKG/releases/tag/v2.1.0),
 [extractor source](https://github.com/seregonwar/ShadPKG/blob/v2.1.0/core/file_format/pkg.cpp),
-[CLI source](https://github.com/seregonwar/ShadPKG/blob/v2.1.0/main.cpp).
+[CLI source](https://github.com/seregonwar/ShadPKG/blob/v2.1.0/main.cpp),
+[Itemzflow source](https://github.com/LightningMods/Itemzflow).

@@ -1524,6 +1524,29 @@ mod tests {
     }
 
     #[test]
+    fn live_payback_catalog_has_matching_identity_and_selectable_manifest() {
+        let updates = sony_updates_for_title("CUSA05986")
+            .expect("Sony CUSA05986 TLS catalogue lookup failed");
+        assert!(!updates.is_empty());
+        for update in &updates {
+            assert_eq!(update.title_id, "CUSA05986");
+            assert_eq!(update.content_id, "EP0006-CUSA05986_00-NFS1800000000001");
+            assert!(update.required_firmware.is_some());
+            let package =
+                update_package(update).expect("CUSA05986 manifest lookup/validation failed");
+            assert_eq!(package.size_bytes, update.size_bytes);
+            assert!(!package.pieces.is_empty());
+            eprintln!(
+                "CUSA05986 v{} | firmware {} | {:?} bytes | {} verified manifest pieces",
+                update.version,
+                update.required_firmware.as_ref().unwrap(),
+                update.size_bytes,
+                package.pieces.len()
+            );
+        }
+    }
+
+    #[test]
     fn live_sony_catalog_includes_a_firmware_requirement() {
         let updates =
             sony_updates_for_title("CUSA00552").expect("live Sony catalog request must succeed");
