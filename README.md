@@ -5,6 +5,11 @@ It brings together Xbox 360 ISO-to-GOD conversion and workflows for PlayStation,
 Nintendo formats. The application can inspect source files, organize game and update content,
 prepare supported outputs, and save supported outputs to a local folder or removable USB drive.
 
+For PS4 FPKG conversion, supply an already fake signed base-game PKG and a matching already
+fake signed update PKG. Digital Forge validates their embedded identities and merges them with
+OrbisPkgTool. DLC remains separate. The PS4 workflow no longer discovers or downloads Sony
+updates or decrypts retail packages; see [PS4 FPKG workflow](docs/PS4-MANUAL-FPKG.md).
+
 Supported formats and conversion paths are listed on the [Supported formats page](site/formats.html),
 along with each path's current testing status. Implemented does not mean tested; check that status
 before relying on a conversion for a particular console or game.

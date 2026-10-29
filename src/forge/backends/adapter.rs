@@ -791,30 +791,52 @@ fn run_pkgtool(
             "built-in PS4 PKG validation",
         ));
     }
-    let identity = crate::forge::shadpkg::inspect_package(source)?;
-    if let Some(expected) = title_id {
-        ensure!(
-            expected.eq_ignore_ascii_case(&identity.title_id),
-            "selected game ID does not match embedded package identity"
-        );
-    }
-    let folder = output_dir.join(&identity.content_id);
-    let report = crate::forge::shadpkg::extract_package(source, &folder, cancelled, |event| {
-        progress(event)
-    })?;
+    ensure!(
+        !cancelled.load(Ordering::Relaxed),
+        "PS4 extraction cancelled"
+    );
+    let tool = find_native_orbis_pkg_tool()
+        .or_else(find_orbis_pkg_tool)
+        .context("managed OrbisPkgTool extractor is unavailable")?;
+    let folder = output_dir.join(title_id.unwrap_or("PS4-extracted"));
+    let output = Command::new(&tool)
+        .arg("extract")
+        .arg(source)
+        .arg(&folder)
+        .output()
+        .with_context(|| format!("could not launch OrbisPkgTool for {}", source.display()))?;
+    ensure!(
+        output.status.success()
+            && folder.join("Image0").is_dir()
+            && folder.join("Sc0/param.sfo").is_file(),
+        "OrbisPkgTool could not extract a usable PS4 package: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        !cancelled.load(Ordering::Relaxed),
+        "PS4 extraction cancelled"
+    );
+    progress(ProgressUpdate {
+        stage: "OrbisPkgTool extraction complete".into(),
+        percent: 100,
+        details: None,
+        bytes_processed: 0,
+        total_bytes: 0,
+    });
     Ok(Execution {
-        output_path: report.output_path,
+        output_path: folder.clone(),
         aux_files: Vec::new(),
         command: vec![
-            "ShadPKG".into(),
+            tool.display().to_string(),
             "extract".into(),
             source.display().to_string(),
             folder.display().to_string(),
         ],
-        stdout: report.diagnostics,
-        stderr: String::new(),
-        exit_code: Some(0),
-        tool_version: Some("ShadPKG 2.1.0".into()),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code(),
+        tool_version: Some("OrbisPkgTool".into()),
     })
 }
 
