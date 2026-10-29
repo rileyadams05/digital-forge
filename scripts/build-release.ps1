@@ -28,25 +28,6 @@ function Copy-ManagedTree([string]$Source, [string]$Destination) {
     }
 }
 
-function Copy-ShadPkgRuntime([string]$Destination) {
-    $source = Join-Path $repo 'consoles\PlayStation\FPKG\tools\ShadPKG'
-    $binary = Join-Path $source 'shadpkg.exe'
-    $expected = '31D932BA5129ED50ECD4738DCF720B9C47881D1CB1EA41817651387446D90068'
-    if ((Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash -ne $expected) {
-        throw 'ShadPKG 2.1.0 release checksum mismatch'
-    }
-    $runtime = Join-Path $Destination 'runtime\ps4\ShadPKG'
-    Copy-ManagedTree $source $runtime
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    $vsRoot = & $vswhere -latest -products '*' -property installationPath
-    $crt = Get-ChildItem -Path (Join-Path $vsRoot 'VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT') -Directory |
-        Sort-Object FullName -Descending | Select-Object -First 1
-    if (-not $crt) { throw 'The Visual C++ x64 redistributable directory is required to package ShadPKG.' }
-    foreach ($dll in @('msvcp140.dll','msvcp140_atomic_wait.dll','vcruntime140.dll','vcruntime140_1.dll')) {
-        Copy-Item -LiteralPath (Join-Path $crt.FullName $dll) -Destination $runtime -Force
-    }
-}
-
 function Copy-AnyPS5Runtime([string]$Destination) {
     $sourceRoot = Join-Path $repo 'consoles\PlayStation\AnyPS5'
     $manifest = Join-Path $sourceRoot 'SHA256SUMS.txt'
@@ -161,13 +142,13 @@ function Write-ReleaseManifest($Name, $Config, $Destination) {
         "Digital Forge release: $Name"
         "Platform: $($Config.Os)"
         "Architecture: $($Config.Architecture)"
-        'Legacy FTP/rclone console transfer has been removed. The PS4 update downloader continues to use HTTPS, and the PS5 dump receiver remains a separate feature.'
+        'Legacy FTP/rclone console transfer and PS4 automatic update download/extraction have been removed. The PS5 dump receiver remains a separate feature.'
         "PS3 ISO / JB folder: extractps3iso and makeps3iso from Bucanero/Estwald tag 277db7de were rebuilt locally with MSVC because the upstream MinGW binaries failed to start on this Windows host (loader error 623). Synthetic JB→ISO→JB and split-ISO extraction round-trip tests passed. Upstream GPL source archive, modified MSVC-compatible C source, Win32 directory shim, build notes and GPL-3.0 license are included in runtime/ps3iso. Real commercial game ISO testing was not performed; encrypted ISOs require separate handling."
         "PS3 PKG creation and extraction: unavailable. Digital Forge does not create installable game PKGs from disc dumps or bypass PS3 package licensing/signing. No supported safe PKG extractor is bundled. Existing package files are not converted; the retired PS3DK implementation remains removed."
         "PS4 base and update GP4 generation / FPKG creation: OrbisPkgTool v1.0.0 is bundled after verifying its official release archive SHA256 (C19FB3905AECEA32BCA41CD13D5EBA1172B82056AF5DCD69FCFECBF866BC8D63). Synthetic packaging fixtures with non-launchable dummy eboot files passed the Digital Forge backend, GP4 generation, FPKG creation, 8-stage validation, and metadata readback for both base and update categories. Windows error 623 is avoided by using this managed builder instead of the patched publisher; no real-game or PS4 hardware result is claimed."
-        "PS4 automatic update catalogue: Digital Forge queries Sony's public per-title XML, retains and numerically sorts advertised package/version records, and filters using required firmware decoded from system_ver. The user enters the PS4 system software version manually; the PC does not infer console firmware. Selected versions use Sony package manifests and the TLS-validated, digest-checked package-piece downloader. Itemzflow's PATCH_API_URL is private in its public source and is not guessed or queried. The active live tests retrieve Sony catalogue data and download/cache a real update, then verify TLS, package metadata, PKG integrity, and every piece hash; tests fail on live network or validation errors. This does not claim real-game merge or console hardware testing."
+        'PS4 FPKG workflow: the user supplies one already fake signed base-game PKG and one matching already fake signed update PKG. Digital Forge validates package category, Title ID and Content ID before merging. DLC is packaged and delivered as separate add-on FPKGs.'
         'Automated tests: the normal Cargo suite has no ignored tests. PS3-specific and AnyPS5-specific tests are preserved behind the opt-in deferred-console-integration-tests feature and are excluded from normal test runs while those systems are on hold.'
-        'PS4 extraction: managed ShadPKG 2.1.0 (official Windows x64 SHA256 31d932ba5129ed50ecd4738dcf720b9c47881d1cb1ea41817651387446d90068), with app-local Microsoft Visual C++ runtime. OrbisPkgTool remains the inspector and FPKG builder. Synthetic base, update and DLC extraction passed. The real CUSA05986 Sony update 01.10 triggered ShadPKG access violation 0xC0000005 and heap corruption 0xC0000374; retail update decryption and real-game FPKG conversion are NOT verified. Digital Forge preserves the verified download and rejects incomplete or metadata-only output.'
+        'PS4 extraction and FPKG building use the managed OrbisPkgTool runtime. Retail PS4 PKG decryption, Sony update lookup/download and ShadPKG are not part of this release.'
         "PS5 ItemzFlow: plain TAR input is detected for PS5, extracted with path traversal/link/special-file rejection, scanned for one game root, validated, and copied to the Itemzflow output. Synthetic TAR extraction, traversal rejection, metadata checks, and export tests passed. This requires an already prepared native eboot.bin, sce_sys/param.json, matching param.sfo, and sce_module. Digital Forge does not fake-sign or transform executables; raw dumps missing these prepared files are rejected. No physical PS5 launch test was performed."
         "PS5 AnyPS5: debug-FIH-PKG/folder preparation is bundled and synthetic-fixture tested; output still requires the separate AnyPS5 relinker and is not presented as playable."
         "Build source: $($Config.CargoTarget) / cargo build --release --locked"
@@ -206,7 +187,7 @@ foreach ($name in $names) {
         @(
             "Digital Forge release build blocked for $name."
             "Target: $($config.CargoTarget)"
-            "The previous executable was deliberately removed and must not be used as a current release."
+            "The previous executable was not replaced and must not be treated as this build."
             "Install the target's compatible compiler/linker toolchain, then rerun scripts/build-release.ps1."
         ) | Set-Content -LiteralPath (Join-Path $destination 'RELEASE-BUILD-BLOCKED.txt') -Encoding utf8
         throw "Cargo release build failed for $name. Existing release files were not replaced."
@@ -238,7 +219,15 @@ foreach ($name in $names) {
         Copy-ManagedTree (Join-Path $repo 'vendor\ps3-update-dl') (Join-Path $runtime 'ps3-update-dl')
         Copy-AnyPS5Runtime $destination
         Copy-OrbisPkgToolRuntime $destination
-        Copy-ShadPkgRuntime $destination
+        $retiredShad = Join-Path $destination 'runtime\ps4\ShadPKG'
+        if (Test-Path -LiteralPath $retiredShad) {
+            $releaseResolved = [System.IO.Path]::GetFullPath($destination).TrimEnd('\')
+            $retiredResolved = [System.IO.Path]::GetFullPath($retiredShad)
+            if (-not $retiredResolved.StartsWith($releaseResolved + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "Retired runtime path is outside the release directory: $retiredResolved"
+            }
+            Remove-Item -LiteralPath $retiredShad -Recurse -Force
+        }
         Copy-PS3IsoRuntime $destination
         Write-ReleaseManifest $name $config $destination
     } elseif ($config.Os -eq 'Windows') {
