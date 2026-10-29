@@ -264,17 +264,17 @@ fn ps4_pkg_input_recommends_ps4_folder_over_pkg() {
         Platform::PlayStation4,
         Platform::PlayStation4.default_profile(),
     );
-    assert_eq!(choices.len(), 3);
+    assert_eq!(choices.len(), 2);
     assert_eq!(choices[0].target_format, TargetFormat::Ps4Folder);
     assert!(choices[0].is_recommended);
     let target_formats: Vec<_> = choices.iter().map(|c| c.target_format).collect();
     assert!(target_formats.contains(&TargetFormat::Ps4Folder));
     assert!(target_formats.contains(&TargetFormat::Ps4FakePkg));
-    assert!(target_formats.contains(&TargetFormat::Ps4RetailPkg));
+    assert!(!target_formats.contains(&TargetFormat::Ps4RetailPkg));
 }
 
 #[test]
-fn ps4_all_source_formats_expose_three_distinct_output_choices() {
+fn ps4_source_formats_do_not_offer_unsupported_retail_conversion() {
     let test_sources = [
         SourceFormat::Ps4FakePkg,
         SourceFormat::Ps4RetailPkg,
@@ -291,16 +291,22 @@ fn ps4_all_source_formats_expose_three_distinct_output_choices() {
             Platform::PlayStation4,
             Platform::PlayStation4.default_profile(),
         );
-        assert_eq!(
-            choices.len(),
-            3,
-            "Source {:?} should produce exactly 3 internal format options (Loose Folder, FPKG, Retail PKG)",
-            source
-        );
         let target_formats: Vec<_> = choices.iter().map(|c| c.target_format).collect();
-        assert!(target_formats.contains(&TargetFormat::Ps4Folder));
-        assert!(target_formats.contains(&TargetFormat::Ps4FakePkg));
-        assert!(target_formats.contains(&TargetFormat::Ps4RetailPkg));
+        for (index, format) in target_formats.iter().enumerate() {
+            assert!(
+                !target_formats[..index].contains(format),
+                "duplicate PS4 output choice for {source:?}"
+            );
+        }
+        if matches!(source, SourceFormat::Ps4FakePkg | SourceFormat::Ps4Folder) {
+            assert!(target_formats.contains(&TargetFormat::Ps4Folder));
+            assert!(target_formats.contains(&TargetFormat::Ps4FakePkg));
+            assert!(!target_formats.contains(&TargetFormat::Ps4RetailPkg));
+        }
+        if source == SourceFormat::Ps4RetailPkg {
+            assert!(!target_formats.contains(&TargetFormat::Ps4FakePkg));
+            assert!(!target_formats.contains(&TargetFormat::Ps4Folder));
+        }
     }
 }
 

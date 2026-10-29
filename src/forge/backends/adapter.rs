@@ -813,6 +813,21 @@ fn run_pkgtool(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let game_folder = folder.join("Image0");
+    let mut pending = vec![(folder.join("Sc0"), game_folder.join("sce_sys"))];
+    while let Some((source_dir, target_dir)) = pending.pop() {
+        fs::create_dir_all(&target_dir)?;
+        for entry in fs::read_dir(&source_dir)? {
+            let entry = entry?;
+            let source = entry.path();
+            let target = target_dir.join(entry.file_name());
+            if source.is_dir() {
+                pending.push((source, target));
+            } else if source.is_file() {
+                fs::copy(&source, &target)?;
+            }
+        }
+    }
     ensure!(
         !cancelled.load(Ordering::Relaxed),
         "PS4 extraction cancelled"
@@ -825,7 +840,7 @@ fn run_pkgtool(
         total_bytes: 0,
     });
     Ok(Execution {
-        output_path: folder.clone(),
+        output_path: game_folder,
         aux_files: Vec::new(),
         command: vec![
             tool.display().to_string(),
@@ -1586,6 +1601,10 @@ pub fn find_native_orbis_pkg_tool() -> Option<PathBuf> {
     candidates.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("consoles/PlayStation/FPKG/tools/DigitalForge/OrbisPkgTool.exe"),
+    );
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../Releases/WIN-X64/runtime/ps4/OrbisPkgTool/OrbisPkgTool.exe"),
     );
     candidates.into_iter().find(|path| path.is_file())
 }
