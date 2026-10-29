@@ -3754,13 +3754,7 @@ fn run_ps4_package_groups_flow(
                 &package_progress,
             )?;
         } else {
-            package_progress.render(40, "Package", "Finalising base package");
-            if target_format == iso2god::forge::TargetFormat::Ps4FakePkg && !base_meta.is_fake {
-                run_orbis_repack(&tool, &base_pkg, &final_pkg, &job_ws.root)?;
-            } else {
-                fs::copy(&base_pkg, &final_pkg)?;
-            }
-            package_progress.render(95, "Verifying", "Checking final package");
+            bail!("a matching, already fake signed update FPKG is required for PS4 conversion");
         }
 
         // DLC packages are independent add-on packages. Never fold add-on
@@ -4368,122 +4362,6 @@ fn render_orbis_merge_progress(progress: &Ps4PackageProgress, line: &str) {
         };
         progress.render(overall, label, stage);
     }
-}
-
-fn run_orbis_repack(
-    tool: &Path,
-    input_pkg: &Path,
-    output_pkg: &Path,
-    temp_ws: &Path,
-) -> Result<(), Error> {
-    let partial = output_pkg.with_extension("partial.pkg");
-    let work_root = temp_ws.join("repack_work");
-    fs::create_dir_all(&work_root)?;
-
-    println!("\nRepacking PS4 PKG into Fake PKG...");
-    let status = Command::new(tool)
-        .arg("repack")
-        .arg(input_pkg)
-        .arg("--out")
-        .arg(&partial)
-        .arg("--validate")
-        .arg("--workers")
-        .arg("0")
-        .arg("--work-dir")
-        .arg(&work_root)
-        .env("TEMP", temp_ws)
-        .env("TMP", temp_ws)
-        .status()
-        .with_context(|| format!("could not start {}", tool.display()))?;
-
-    if !status.success() {
-        let _ = fs::remove_file(&partial);
-        bail!("PS4 PKG repack failed");
-    }
-    rebuild_ps4_pkg_with_liborbis(&partial, output_pkg, temp_ws)?;
-    let _ = fs::remove_file(&partial);
-    let _ = fs::remove_dir_all(&work_root);
-    Ok(())
-}
-
-fn rebuild_ps4_pkg_with_liborbis(
-    staged_pkg: &Path,
-    output_pkg: &Path,
-    temp_ws: &Path,
-) -> Result<(), Error> {
-    let pkgtool = find_liborbis_pkg_tool()
-        .context("maxton/LibOrbisPkg PkgTool is required for final PS4 FPKG assembly")?;
-    let project_dir = temp_ws.join("liborbis_project");
-    let build_dir = temp_ws.join("liborbis_output");
-    fs::create_dir_all(&project_dir)?;
-    fs::create_dir_all(&build_dir)?;
-
-    let make = Command::new(&pkgtool)
-        .arg("pkg_makegp4")
-        .arg(staged_pkg)
-        .arg(&project_dir)
-        .env("TEMP", temp_ws)
-        .env("TMP", temp_ws)
-        .output()?;
-    ensure!(
-        make.status.success(),
-        "LibOrbisPkg could not reopen the staged PS4 package: {}{}",
-        String::from_utf8_lossy(&make.stdout),
-        String::from_utf8_lossy(&make.stderr)
-    );
-    let gp4 = fs::read_dir(&project_dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("gp4"))
-        })
-        .context("LibOrbisPkg did not generate a GP4 project")?;
-
-    let build = Command::new(&pkgtool)
-        .arg("pkg_build")
-        .arg(&gp4)
-        .arg(&build_dir)
-        .env("TEMP", temp_ws)
-        .env("TMP", temp_ws)
-        .output()?;
-    ensure!(
-        build.status.success(),
-        "LibOrbisPkg FPKG build failed: {}{}",
-        String::from_utf8_lossy(&build.stdout),
-        String::from_utf8_lossy(&build.stderr)
-    );
-    let built = fs::read_dir(&build_dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("pkg"))
-        })
-        .context("LibOrbisPkg completed without a PKG output")?;
-
-    let validation = Command::new(&pkgtool)
-        .arg("pkg_validate")
-        .arg("--verbose")
-        .arg(&built)
-        .env("TEMP", temp_ws)
-        .env("TMP", temp_ws)
-        .output()?;
-    let validation_text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&validation.stdout),
-        String::from_utf8_lossy(&validation.stderr)
-    );
-    ensure!(
-        validation.status.success() && !validation_text.contains("[ERROR]"),
-        "LibOrbisPkg rejected its rebuilt package:\n{validation_text}"
-    );
-    let rename_res = fs::rename(&built, output_pkg)
-        .with_context(|| format!("could not finalize merged package {}", output_pkg.display()));
-    let _ = remove_dir_all_robust(&project_dir);
-    let _ = remove_dir_all_robust(&build_dir);
-    rename_res?;
-    Ok(())
 }
 
 fn validate_completed_package(
@@ -5877,24 +5755,6 @@ fn find_orbis_pkg_tool() -> Option<PathBuf> {
         return in_path;
     }
     iso2god::forge::backends::find_orbis_pkg_tool()
-}
-
-fn find_liborbis_pkg_tool() -> Option<PathBuf> {
-    if let Some(configured) = env::var_os("DIGITAL_FORGE_LIBORBIS_PKG_TOOL") {
-        let path = PathBuf::from(configured);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    if let Ok(executable) = env::current_exe()
-        && let Some(directory) = executable.parent()
-    {
-        let sibling = directory.join("PkgTool.exe");
-        if sibling.is_file() {
-            return Some(sibling);
-        }
-    }
-    iso2god::forge::backends::find_liborbis_pkg_tool()
 }
 
 fn unique_completed_pkg(parent: &Path) -> PathBuf {
